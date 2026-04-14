@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
@@ -15,7 +16,7 @@ import 'package:file_picker/file_picker.dart';
 //  Vrai téléphone    : 'http://192.168.X.X:5000'
 //  Chrome / Web      : 'http://localhost:5000'
 // ══════════════════════════════════════════
-const String baseUrl = 'http://localhost:5000';
+const String baseUrl = 'http://192.168.100.208:5000';
 
 // ══════════════════════════════════════════
 //  DESIGN TOKENS
@@ -202,7 +203,12 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('token', data['token']);
         await prefs.setString('user', jsonEncode(data['user']));
-        Navigator.pushReplacement(context, _slideRoute(Dashboard()));
+        final role = data['user']['role'] ?? 'user';
+        if (role == 'admin') {
+          Navigator.pushReplacement(context, _slideRoute(AdminDashboard()));
+        } else {
+          Navigator.pushReplacement(context, _slideRoute(Dashboard()));
+        }
       } else {
         _showSnack('Email ou mot de passe incorrect', isError: true);
       }
@@ -521,6 +527,11 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   String _filter    = 'Tous';
   int _currentTab   = 0;
 
+  // Recherche sémantique FAISS
+  List _searchResults    = [];
+  bool _searchLoading    = false;
+  bool _semanticMode     = false; // false = local, true = FAISS
+
   late TabController _tabCtrl;
   final _searchCtrl = TextEditingController();
 
@@ -551,7 +562,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       final token = prefs.getString('token') ?? '';
       final res = await http.get(
         Uri.parse('$baseUrl/api/media/dashboard'),
-        headers: {'x-auth-token': token},
+        headers: {'Authorization': 'Bearer $token'},
       ).timeout(Duration(seconds: 10));
       if (res.statusCode == 200) {
         setState(() => _stats = jsonDecode(res.body));
@@ -565,12 +576,34 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       final token = prefs.getString('token') ?? '';
       final res = await http.get(
         Uri.parse('$baseUrl/api/media'),
-        headers: {'x-auth-token': token},
+        headers: {'Authorization': 'Bearer $token'},
       ).timeout(Duration(seconds: 10));
       if (res.statusCode == 200) {
         setState(() => _allMedias = jsonDecode(res.body));
       }
     } catch (_) {}
+  }
+
+  // ─── RECHERCHE SÉMANTIQUE FAISS ─────────
+  Future<void> _semanticSearch(String query) async {
+    if (query.trim().isEmpty) {
+      setState(() { _searchResults = []; _searchLoading = false; });
+      return;
+    }
+    setState(() => _searchLoading = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('token') ?? '';
+      final uri = Uri.parse('$baseUrl/api/media/search').replace(queryParameters: {'q': query});
+      final res = await http.get(uri, headers: {'Authorization': 'Bearer $token'})
+          .timeout(Duration(seconds: 20));
+      if (res.statusCode == 200) {
+        setState(() => _searchResults = jsonDecode(res.body));
+      }
+    } catch (e) {
+      _showSnack('Erreur recherche: $e', isError: true);
+    }
+    setState(() => _searchLoading = false);
   }
 
   // ─── UPLOAD ─────────────────────────────
@@ -581,11 +614,12 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('token') ?? '';
       var req = http.MultipartRequest('POST', Uri.parse('$baseUrl/api/media/upload'));
-      req.headers['x-auth-token'] = token;
+      req.headers['Authorization'] = 'Bearer $token';
       req.files.add(http.MultipartFile.fromBytes(
         'media',
         bytes,
         filename: fileName,
+        contentType: MediaType.parse(mimeType),
       ));
       final streamed = await req.send().timeout(Duration(seconds: 60));
       final res = await http.Response.fromStream(streamed);
@@ -721,10 +755,36 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       list = list.where((m) {
         final name = (m['originalName'] ?? '').toLowerCase();
         final tags = (m['tags'] ?? []).join(' ').toLowerCase();
-        return name.contains(_search.toLowerCase()) || tags.contains(_search.toLowerCase());
+        final desc = (m['description'] ?? '').toLowerCase();
+        final objs = (m['aiObjects'] ?? []).join(' ').toLowerCase();
+        final q    = _search.toLowerCase();
+        return name.contains(q) || tags.contains(q) || desc.contains(q) || objs.contains(q);
       }).toList();
     }
     return list;
+  }
+
+  Future<void> _toggleFavorite(Map m) async {
+    final mediaId = (m['_id'] ?? m['id'] ?? '').toString();
+    if (mediaId.isEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('token') ?? '';
+      final res = await http.patch(
+        Uri.parse('$baseUrl/api/media/$mediaId/favorite'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final updated = jsonDecode(res.body);
+        setState(() {
+          final idx = _allMedias.indexWhere((e) => (e['_id'] ?? e['id']).toString() == mediaId);
+          if (idx != -1) _allMedias[idx] = updated;
+        });
+        _showSnack(updated['favorite'] == true ? '⭐ Ajouté aux favoris' : 'Retiré des favoris');
+      }
+    } catch (e) {
+      _showSnack('Erreur: $e', isError: true);
+    }
   }
 
   Future<void> _deleteMedia(String id) async {
@@ -738,7 +798,6 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       final res = await http.delete(
         Uri.parse('$baseUrl/api/media/$id'),
         headers: {
-          'x-auth-token': token,
           'Authorization': 'Bearer $token',
         },
       ).timeout(Duration(seconds: 15));
@@ -833,7 +892,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
                     crossAxisCount: 2,
                     mainAxisSpacing: 14,
                     crossAxisSpacing: 14,
-                    childAspectRatio: 0.88,
+                    childAspectRatio: 0.85,
                   ),
                 ),
               ),
@@ -974,66 +1033,179 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildMediaCard(Map m) {
-    final type  = m['type'] ?? 'document';
-    final name  = m['originalName'] ?? 'Sans nom';
-    final tags  = (m['tags'] as List? ?? []);
-    final analyzed = m['analyzed'] == true;
-    final id    = m['_id'] ?? '';
+  // Construit l'URL de prévisualisation d'un média
+  String? _previewUrl(Map m) {
+    final filename = m['filename'];
+    if (filename == null || filename.toString().isEmpty) return null;
+    return '$baseUrl/uploads/$filename';
+  }
 
-    return GestureDetector(
-      onLongPress: () => _showMediaOptions(m),
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.darkCard,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.white.withOpacity(0.06)),
-        ),
-        child: Stack(children: [
-          Padding(
-            padding: EdgeInsets.all(14),
+  Widget _buildMediaCard(Map m) {
+    final type        = m['type'] ?? 'document';
+    final name        = m['originalName'] ?? 'Sans nom';
+    final objects     = (m['aiObjects'] as List? ?? []);
+    final tags        = (m['tags'] as List? ?? []);
+    final analyzed    = m['analyzed'] == true;
+    final displayTags = objects.isNotEmpty ? objects : tags;
+    final previewUrl  = _previewUrl(m);
+    final isImage     = type == 'image';
+    final mediaId     = (m['_id'] ?? m['id'] ?? '').toString();
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: Stack(fit: StackFit.expand, children: [
+
+        // ── Image / icône plein cadre ──────────
+        isImage && previewUrl != null
+            ? Image.network(
+                previewUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => _fullIconPreview(type),
+                loadingBuilder: (_, child, progress) => progress == null
+                    ? child
+                    : Container(
+                        color: AppColors.surface,
+                        child: Center(child: CircularProgressIndicator(
+                          color: AppColors.primary, strokeWidth: 2,
+                          value: progress.expectedTotalBytes != null
+                              ? progress.cumulativeBytesLoaded / progress.expectedTotalBytes!
+                              : null,
+                        )),
+                      ),
+              )
+            : _fullIconPreview(type),
+
+        // ── Dégradé bas ───────────────────────
+        Positioned(
+          left: 0, right: 0, bottom: 0,
+          child: Container(
+            padding: EdgeInsets.fromLTRB(10, 24, 10, 10),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.bottomCenter,
+                end: Alignment.topCenter,
+                colors: [Colors.black.withOpacity(0.85), Colors.transparent],
+              ),
+            ),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Container(
-                width: 48, height: 48,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(colors: _typeGradient(type)),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(_typeIcon(type), color: Colors.white, size: 24),
-              ),
-              SizedBox(height: 12),
-              Text(
-                name,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13),
-              ),
-              SizedBox(height: 6),
-              if (tags.isNotEmpty)
-                Wrap(spacing: 4, runSpacing: 4, children: tags.take(2).map<Widget>((t) => Container(
-                  padding: EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text('#$t', style: TextStyle(color: AppColors.secondary, fontSize: 10)),
-                )).toList()),
-              Spacer(),
+              Text(name, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 12)),
+              SizedBox(height: 4),
+              if ((m['description'] ?? '').toString().isNotEmpty)
+                Text(m['description'], maxLines: 1, overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: AppColors.secondary, fontSize: 10)),
               Row(children: [
-                Icon(Icons.circle, size: 8, color: analyzed ? AppColors.success : AppColors.warning),
-                SizedBox(width: 5),
-                Text(analyzed ? 'Analysé' : 'En attente', style: AppTextStyles.caption.copyWith(fontSize: 11)),
+                Icon(Icons.circle, size: 7, color: analyzed ? AppColors.success : AppColors.warning),
+                SizedBox(width: 4),
+                Text(analyzed ? 'Analysé' : 'En attente',
+                    style: TextStyle(color: Colors.white70, fontSize: 10)),
+                if (displayTags.isNotEmpty) ...[
+                  SizedBox(width: 6),
+                  Expanded(child: Text(
+                    displayTags.take(1).map((t) => '#$t').join(' '),
+                    style: TextStyle(color: AppColors.secondary, fontSize: 10),
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                  )),
+                ],
               ]),
             ]),
           ),
+        ),
+
+        // ── Badge type (non-image) ────────────
+        if (!isImage)
           Positioned(
-            top: 8, right: 8,
-            child: GestureDetector(
-              onTap: () => _showMediaOptions(m),
-              child: Icon(Icons.more_vert, color: AppColors.textMuted, size: 20),
+            top: 8, left: 8,
+            child: Container(
+              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(_typeIcon(type), color: Colors.white, size: 12),
+                SizedBox(width: 4),
+                Text(type, style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w600)),
+              ]),
             ),
           ),
-        ]),
+
+        // ── Boutons supprimer / description / favori ───
+        Positioned(
+          top: 6, right: 6,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () => _confirmDelete(context, m, mediaId),
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.accent.withOpacity(0.7)),
+                  ),
+                  child: Icon(Icons.delete_outline, color: AppColors.accent, size: 16),
+                ),
+              ),
+            ),
+            SizedBox(height: 4),
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () => _showDescriptionDialog(m),
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.secondary.withOpacity(0.7)),
+                  ),
+                  child: Icon(Icons.edit_note, color: AppColors.secondary, size: 16),
+                ),
+              ),
+            ),
+            SizedBox(height: 4),
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () => _toggleFavorite(m),
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.amber.withOpacity(0.7)),
+                  ),
+                  child: Icon(
+                    m['favorite'] == true ? Icons.star : Icons.star_border,
+                    color: Colors.amber,
+                    size: 16,
+                  ),
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  Widget _actionBtn(IconData icon, Color color, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: EdgeInsets.all(5),
+        decoration: BoxDecoration(
+          color: Colors.black54,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withOpacity(0.5)),
+        ),
+        child: Icon(icon, color: color, size: 16),
       ),
     );
   }
@@ -1057,39 +1229,129 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
               Navigator.pop(sheetCtx);
               _showMediaDetails(m);
             }),
+            _optionTile(Icons.edit_note, 'Ajouter / modifier une description', () {
+              Navigator.pop(sheetCtx);
+              _showDescriptionDialog(m);
+            }, color: AppColors.secondary),
             _optionTile(Icons.delete_outline, 'Supprimer', () {
               Navigator.pop(sheetCtx);
-              showDialog(
-                context: ctx,
-                builder: (dlgCtx) => AlertDialog(
-                  backgroundColor: AppColors.darkCard,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                  title: Text('Supprimer le média ?', style: TextStyle(color: Colors.white)),
-                  content: Text(
-                    'Voulez-vous vraiment supprimer "${m['originalName'] ?? 'ce fichier'}" ? Cette action est irréversible.',
-                    style: TextStyle(color: AppColors.textLight),
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(dlgCtx),
-                      child: Text('Annuler', style: TextStyle(color: AppColors.textMuted)),
-                    ),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
-                      onPressed: () {
-                        Navigator.pop(dlgCtx);
-                        _deleteMedia(mediaId);
-                      },
-                      child: Text('Supprimer'),
-                    ),
-                  ],
-                ),
-              );
+              _confirmDelete(ctx, m, mediaId);
             }, color: AppColors.accent),
           ]),
         ),
       ),
     );
+  }
+
+  void _confirmDelete(BuildContext ctx, Map m, String mediaId) {
+    showDialog(
+      context: ctx,
+      builder: (dlgCtx) => AlertDialog(
+        backgroundColor: AppColors.darkCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text('Supprimer le média ?', style: TextStyle(color: Colors.white)),
+        content: Text(
+          'Voulez-vous vraiment supprimer "${m['originalName'] ?? 'ce fichier'}" ? Cette action est irréversible.',
+          style: TextStyle(color: AppColors.textLight),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx),
+            child: Text('Annuler', style: TextStyle(color: AppColors.textMuted)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
+            onPressed: () {
+              Navigator.pop(dlgCtx);
+              _deleteMedia(mediaId);
+            },
+            child: Text('Supprimer'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDescriptionDialog(Map m) {
+    final mediaId = (m['_id'] ?? m['id'] ?? '').toString();
+    final ctrl = TextEditingController(text: m['description'] ?? '');
+    showDialog(
+      context: context,
+      builder: (dlgCtx) => AlertDialog(
+        backgroundColor: AppColors.darkCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(children: [
+          Icon(Icons.edit_note, color: AppColors.secondary, size: 22),
+          SizedBox(width: 8),
+          Text('Description', style: TextStyle(color: Colors.white)),
+        ]),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text(
+            'Décrivez le contenu pour améliorer la recherche IA.\nEx: "chien noir qui court dans un parc"',
+            style: AppTextStyles.caption.copyWith(fontSize: 12),
+          ),
+          SizedBox(height: 14),
+          TextField(
+            controller: ctrl,
+            maxLines: 3,
+            autofocus: true,
+            style: TextStyle(color: Colors.white, fontSize: 14),
+            decoration: InputDecoration(
+              hintText: 'Décrivez ce média…',
+              hintStyle: TextStyle(color: AppColors.textMuted),
+              filled: true,
+              fillColor: AppColors.surface,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: AppColors.secondary.withOpacity(0.4)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: AppColors.secondary, width: 2),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: Colors.white12),
+              ),
+            ),
+          ),
+        ]),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dlgCtx),
+            child: Text('Annuler', style: TextStyle(color: AppColors.textMuted)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.secondary),
+            onPressed: () async {
+              Navigator.pop(dlgCtx);
+              await _saveDescription(mediaId, ctrl.text.trim());
+            },
+            child: Text('Enregistrer'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _saveDescription(String mediaId, String description) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('token') ?? '';
+      final res = await http.patch(
+        Uri.parse('$baseUrl/api/media/$mediaId/description'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode({'description': description}),
+      ).timeout(Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        _showSnack('Description enregistrée ✓', isError: false);
+        await _fetchMedias();
+      } else {
+        _showSnack('Erreur: ${res.statusCode}', isError: true);
+      }
+    } catch (e) {
+      _showSnack('Erreur réseau: $e', isError: true);
+    }
   }
 
   Widget _optionTile(IconData icon, String label, VoidCallback onTap, {Color? color}) {
@@ -1113,10 +1375,22 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
           _detailRow('Type', m['type'] ?? '-'),
           _detailRow('Taille', _formatSize(m['size'] ?? 0)),
           _detailRow('Analysé', m['analyzed'] == true ? 'Oui ✓' : 'Non'),
+          _detailRow('Objets IA', (m['aiObjects'] as List? ?? []).join(', ')),
+          if ((m['aiConfidence'] ?? 0.0) > 0)
+            _detailRow('Confiance IA', '${((m['aiConfidence'] as num).toDouble() * 100).toStringAsFixed(1)}%'),
+          if ((m['description'] ?? '').toString().isNotEmpty)
+            _detailRow('Description', m['description']),
           _detailRow('Tags', (m['tags'] as List? ?? []).join(', ')),
         ]),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: Text('Fermer', style: TextStyle(color: AppColors.primary))),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Fermer', style: TextStyle(color: AppColors.primary)),
+          ),
+          TextButton(
+            onPressed: () { Navigator.pop(context); _showDescriptionDialog(m); },
+            child: Text('Modifier description', style: TextStyle(color: AppColors.secondary)),
+          ),
         ],
       ),
     );
@@ -1161,28 +1435,82 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
 
   // ─── SEARCH TAB ─────────────────────────
   Widget _buildSearchTab() {
-    final medias = _filteredMedias();
+    final localMedias = _filteredMedias();
+    final displayList = (_semanticMode && _search.isNotEmpty) ? _searchResults : localMedias;
+
     return SafeArea(
       child: Column(children: [
         Padding(
-          padding: EdgeInsets.fromLTRB(16, 20, 16, 12),
+          padding: EdgeInsets.fromLTRB(16, 20, 16, 0),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('Recherche', style: AppTextStyles.headline.copyWith(fontSize: 24)),
+            Text('Recherche IA', style: AppTextStyles.headline.copyWith(fontSize: 24)),
+            SizedBox(height: 4),
+            Text('Recherche sémantique par CLIP + FAISS', style: AppTextStyles.caption),
             SizedBox(height: 16),
+            // Toggle mode
+            Row(children: [
+              GestureDetector(
+                onTap: () => setState(() => _semanticMode = true),
+                child: AnimatedContainer(
+                  duration: Duration(milliseconds: 200),
+                  padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    gradient: _semanticMode ? LinearGradient(colors: [AppColors.primary, AppColors.secondary]) : null,
+                    color: _semanticMode ? null : AppColors.darkCard,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: _semanticMode ? Colors.transparent : Colors.white12),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.auto_awesome, size: 14, color: _semanticMode ? Colors.white : AppColors.textMuted),
+                    SizedBox(width: 6),
+                    Text('IA Sémantique', style: TextStyle(
+                      color: _semanticMode ? Colors.white : AppColors.textMuted,
+                      fontSize: 12, fontWeight: FontWeight.w600,
+                    )),
+                  ]),
+                ),
+              ),
+              SizedBox(width: 8),
+              GestureDetector(
+                onTap: () => setState(() => _semanticMode = false),
+                child: AnimatedContainer(
+                  duration: Duration(milliseconds: 200),
+                  padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: !_semanticMode ? AppColors.darkCard.withOpacity(0.9) : AppColors.darkCard,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: !_semanticMode ? AppColors.secondary.withOpacity(0.6) : Colors.white12),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.filter_list, size: 14, color: !_semanticMode ? AppColors.secondary : AppColors.textMuted),
+                    SizedBox(width: 6),
+                    Text('Filtre local', style: TextStyle(
+                      color: !_semanticMode ? AppColors.secondary : AppColors.textMuted,
+                      fontSize: 12, fontWeight: FontWeight.w600,
+                    )),
+                  ]),
+                ),
+              ),
+            ]),
+            SizedBox(height: 12),
             TextField(
               controller: _searchCtrl,
               autofocus: false,
-              onChanged: (v) => setState(() => _search = v),
+              onChanged: (v) {
+                setState(() => _search = v);
+                if (_semanticMode) _semanticSearch(v);
+              },
+              onSubmitted: (v) { if (_semanticMode) _semanticSearch(v); },
               style: TextStyle(color: Colors.white),
               decoration: InputDecoration(
-                hintText: 'Nom, tag, type…',
+                hintText: _semanticMode ? 'Ex: chien qui court, match de football…' : 'Nom, tag, type…',
                 prefixIcon: Icon(Icons.search),
                 suffixIcon: _search.isNotEmpty
                     ? IconButton(
                         icon: Icon(Icons.clear, color: AppColors.textMuted),
                         onPressed: () {
                           _searchCtrl.clear();
-                          setState(() => _search = '');
+                          setState(() { _search = ''; _searchResults = []; });
                         },
                       )
                     : null,
@@ -1190,52 +1518,197 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
             ),
           ]),
         ),
-        _buildFilterChips(),
-        SizedBox(height: 10),
+        if (!_semanticMode) ...[
+          _buildFilterChips(),
+          SizedBox(height: 8),
+        ] else
+          SizedBox(height: 12),
+        // Résultats
         Expanded(
-          child: medias.isEmpty
-              ? _buildEmptyState()
-              : ListView.builder(
-                  padding: EdgeInsets.symmetric(horizontal: 16),
-                  itemCount: medias.length,
-                  itemBuilder: (_, i) => _buildListTile(medias[i]),
-                ),
+          child: _searchLoading
+              ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  CircularProgressIndicator(color: AppColors.primary),
+                  SizedBox(height: 12),
+                  Text('Recherche sémantique en cours…', style: AppTextStyles.caption),
+                ]))
+              : displayList.isEmpty
+                  ? _buildSearchEmptyState()
+                  : ListView.builder(
+                      padding: EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: displayList.length,
+                      itemBuilder: (_, i) => _buildSearchResultTile(displayList[i]),
+                    ),
         ),
       ]),
     );
   }
 
-  Widget _buildListTile(Map m) {
-    final type = m['type'] ?? 'document';
-    final name = m['originalName'] ?? 'Sans nom';
-    final analyzed = m['analyzed'] == true;
+  Widget _buildSearchEmptyState() {
+    if (_search.isEmpty) {
+      return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        Icon(Icons.image_search, size: 56, color: AppColors.primary.withOpacity(0.5)),
+        SizedBox(height: 16),
+        Text('Recherche intelligente', style: AppTextStyles.title),
+        SizedBox(height: 8),
+        Text(
+          _semanticMode
+              ? 'Décrivez ce que vous cherchez\nEx: "chien noir", "coucher de soleil"'
+              : 'Tapez un nom ou un tag',
+          style: AppTextStyles.caption, textAlign: TextAlign.center,
+        ),
+      ]));
+    }
+    return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Icon(Icons.search_off, size: 48, color: AppColors.textMuted),
+      SizedBox(height: 12),
+      Text('Aucun résultat pour "$_search"', style: AppTextStyles.caption),
+    ]));
+  }
+
+  Widget _buildSearchResultTile(Map m) {
+    final type       = m['type'] ?? 'document';
+    final name       = m['originalName'] ?? 'Sans nom';
+    final analyzed   = m['analyzed'] == true;
+    final score      = m['similarityScore'] as double?;
+    final objects    = (m['aiObjects'] as List? ?? []);
+    final confidence = (m['aiConfidence'] as num?)?.toDouble() ?? 0.0;
+    final previewUrl = _previewUrl(m);
+    final isImage    = type == 'image';
+
     return GestureDetector(
       onLongPress: () => _showMediaOptions(m),
       child: Container(
         margin: EdgeInsets.only(bottom: 12),
-        padding: EdgeInsets.all(14),
+        padding: EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: AppColors.darkCard,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: score != null ? AppColors.primary.withOpacity(score.clamp(0.0, 1.0)) : Colors.white.withOpacity(0.06),
+          ),
+        ),
+        child: Row(children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: isImage && previewUrl != null
+                ? Image.network(previewUrl, width: 64, height: 64, fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => _thumbIcon(type))
+                : _thumbIcon(type),
+          ),
+          SizedBox(width: 14),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(name, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14),
+                maxLines: 1, overflow: TextOverflow.ellipsis),
+            SizedBox(height: 4),
+            Row(children: [
+              Icon(Icons.circle, size: 7, color: analyzed ? AppColors.success : AppColors.warning),
+              SizedBox(width: 5),
+              Text(analyzed ? 'Analysé' : 'En attente', style: AppTextStyles.caption.copyWith(fontSize: 11)),
+              if (objects.isNotEmpty) ...[
+                SizedBox(width: 8),
+                Expanded(child: Text(objects.take(2).join(', '),
+                    style: AppTextStyles.caption.copyWith(fontSize: 10, color: AppColors.secondary),
+                    maxLines: 1, overflow: TextOverflow.ellipsis)),
+              ],
+            ]),
+            if (confidence > 0)
+              Text('IA: ${(confidence * 100).toStringAsFixed(0)}%',
+                  style: AppTextStyles.caption.copyWith(fontSize: 10, color: AppColors.warning)),
+          ])),
+          if (score != null)
+            Container(
+              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: AppColors.primary.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppColors.primary.withOpacity(0.4)),
+              ),
+              child: Column(children: [
+                Text('${(score * 100).toStringAsFixed(0)}%',
+                    style: TextStyle(color: AppColors.primary, fontSize: 13, fontWeight: FontWeight.w800)),
+                Text('match', style: AppTextStyles.caption.copyWith(fontSize: 9)),
+              ]),
+            ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _iconPreview(String type, {double height = 120}) {
+    return Container(
+      height: height,
+      width: double.infinity,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: _typeGradient(type).map((c) => c.withOpacity(0.3)).toList(),
+        ),
+      ),
+      child: Icon(_typeIcon(type), color: Colors.white54, size: height * 0.35),
+    );
+  }
+
+  Widget _fullIconPreview(String type) {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
+          colors: _typeGradient(type).map((c) => c.withOpacity(0.5)).toList(),
+        ),
+      ),
+      child: Center(child: Icon(_typeIcon(type), color: Colors.white70, size: 56)),
+    );
+  }
+
+  Widget _thumbIcon(String type) {
+    return Container(
+      width: 64, height: 64,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(colors: _typeGradient(type)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Icon(_typeIcon(type), color: Colors.white, size: 28),
+    );
+  }
+
+  Widget _buildListTile(Map m) {
+    final type       = m['type'] ?? 'document';
+    final name       = m['originalName'] ?? 'Sans nom';
+    final analyzed   = m['analyzed'] == true;
+    final previewUrl = _previewUrl(m);
+    final isImage    = type == 'image';
+
+    return GestureDetector(
+      onLongPress: () => _showMediaOptions(m),
+      child: Container(
+        margin: EdgeInsets.only(bottom: 12),
+        padding: EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: AppColors.darkCard,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: Colors.white.withOpacity(0.06)),
         ),
         child: Row(children: [
-          Container(
-            width: 46, height: 46,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(colors: _typeGradient(type)),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(_typeIcon(type), color: Colors.white, size: 22),
+          // Thumbnail
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: isImage && previewUrl != null
+                ? Image.network(
+                    previewUrl,
+                    width: 64, height: 64, fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => _thumbIcon(type),
+                  )
+                : _thumbIcon(type),
           ),
           SizedBox(width: 14),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(name, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14), maxLines: 1, overflow: TextOverflow.ellipsis),
+            Text(name, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14),
+                maxLines: 1, overflow: TextOverflow.ellipsis),
             SizedBox(height: 4),
             Row(children: [
               Icon(Icons.circle, size: 7, color: analyzed ? AppColors.success : AppColors.warning),
               SizedBox(width: 5),
-              Text(analyzed ? 'Analysé par IA' : 'En attente d\'analyse', style: AppTextStyles.caption.copyWith(fontSize: 11)),
+              Text(analyzed ? 'Analysé par IA' : 'En attente d\'analyse',
+                  style: AppTextStyles.caption.copyWith(fontSize: 11)),
               SizedBox(width: 10),
               Text(_formatSize(m['size']), style: AppTextStyles.caption.copyWith(fontSize: 11)),
             ]),
@@ -1287,28 +1760,142 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   }
 
   void _showProfileSheet() {
-    showModalBottomSheet(
+    // Lire l'email depuis les prefs
+    SharedPreferences.getInstance().then((prefs) {
+      final userJson = prefs.getString('user');
+      final userMap  = userJson != null ? jsonDecode(userJson) as Map : {};
+      final email    = userMap['email'] ?? 'Utilisateur';
+      final role     = userMap['role'] ?? 'user';
+
+      showModalBottomSheet(
+        context: context,
+        backgroundColor: AppColors.darkCard,
+        isScrollControlled: true,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+        builder: (_) => SafeArea(
+          child: SingleChildScrollView(
+            padding: EdgeInsets.all(24),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+              SizedBox(height: 20),
+              CircleAvatar(radius: 36, backgroundColor: AppColors.primary, child: Icon(Icons.person, color: Colors.white, size: 36)),
+              SizedBox(height: 12),
+              Text('Mon Compte', style: AppTextStyles.title),
+              SizedBox(height: 4),
+              Text(email, style: AppTextStyles.caption),
+              SizedBox(height: 8),
+              Container(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(
+                  color: role == 'admin' ? AppColors.accent.withOpacity(0.2) : AppColors.primary.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(role == 'admin' ? '👑 Admin' : '👤 Utilisateur',
+                    style: TextStyle(color: role == 'admin' ? AppColors.accent : AppColors.primary, fontSize: 12, fontWeight: FontWeight.w700)),
+              ),
+              SizedBox(height: 20),
+              Divider(color: Colors.white12),
+              _optionTile(Icons.swap_horiz_rounded, 'Changer de compte', () {
+                Navigator.pop(context);
+                _showSwitchAccountDialog();
+              }, color: AppColors.secondary),
+              if (role == 'admin')
+                _optionTile(Icons.admin_panel_settings, 'Tableau de bord Admin', () {
+                  Navigator.pop(context);
+                  Navigator.push(context, _slideRoute(AdminDashboard()));
+                }, color: AppColors.warning),
+              _optionTile(Icons.logout, 'Se déconnecter', () {
+                Navigator.pop(context);
+                _logout();
+              }, color: AppColors.accent),
+            ]),
+          ),
+        ),
+      );
+    });
+  }
+
+  void _showSwitchAccountDialog() {
+    final emailCtrl = TextEditingController();
+    final passCtrl  = TextEditingController();
+    bool obscure    = true;
+    bool loading    = false;
+
+    showDialog(
       context: context,
-      backgroundColor: AppColors.darkCard,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-      builder: (_) => SafeArea(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
-            SizedBox(height: 20),
-            CircleAvatar(radius: 36, backgroundColor: AppColors.primary, child: Icon(Icons.person, color: Colors.white, size: 36)),
-            SizedBox(height: 12),
-            Text('Mon Compte', style: AppTextStyles.title),
-            SizedBox(height: 4),
-            Text('demo@smartmedia.com', style: AppTextStyles.caption),
-            SizedBox(height: 28),
-            Divider(color: Colors.white12),
-            _optionTile(Icons.logout, 'Se déconnecter', () {
-              Navigator.pop(context);
-              _logout();
-            }, color: AppColors.accent),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          backgroundColor: AppColors.darkCard,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Row(children: [
+            Icon(Icons.swap_horiz_rounded, color: AppColors.secondary),
+            SizedBox(width: 8),
+            Text('Changer de compte', style: TextStyle(color: Colors.white, fontSize: 16)),
           ]),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: emailCtrl,
+              style: TextStyle(color: Colors.white),
+              keyboardType: TextInputType.emailAddress,
+              decoration: InputDecoration(
+                labelText: 'Email',
+                labelStyle: TextStyle(color: AppColors.textMuted),
+                prefixIcon: Icon(Icons.email_outlined, color: AppColors.primary),
+              ),
+            ),
+            SizedBox(height: 12),
+            TextField(
+              controller: passCtrl,
+              obscureText: obscure,
+              style: TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'Mot de passe',
+                labelStyle: TextStyle(color: AppColors.textMuted),
+                prefixIcon: Icon(Icons.lock_outlined, color: AppColors.primary),
+                suffixIcon: IconButton(
+                  icon: Icon(obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined, color: AppColors.textMuted),
+                  onPressed: () => setS(() => obscure = !obscure),
+                ),
+              ),
+            ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Annuler', style: TextStyle(color: AppColors.textMuted))),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: AppColors.secondary),
+              onPressed: loading ? null : () async {
+                if (emailCtrl.text.isEmpty || passCtrl.text.isEmpty) return;
+                setS(() => loading = true);
+                try {
+                  final res = await http.post(
+                    Uri.parse('$baseUrl/api/auth/login'),
+                    headers: {'Content-Type': 'application/json'},
+                    body: jsonEncode({'email': emailCtrl.text.trim(), 'password': passCtrl.text}),
+                  ).timeout(Duration(seconds: 15));
+                  if (res.statusCode == 200) {
+                    final data  = jsonDecode(res.body);
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setString('token', data['token']);
+                    await prefs.setString('user', jsonEncode(data['user']));
+                    final role = data['user']['role'] ?? 'user';
+                    Navigator.pop(ctx);
+                    if (role == 'admin') {
+                      Navigator.pushReplacement(context, _slideRoute(AdminDashboard()));
+                    } else {
+                      Navigator.pushReplacement(context, _slideRoute(Dashboard()));
+                    }
+                  } else {
+                    setS(() => loading = false);
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Email ou mot de passe incorrect')));
+                  }
+                } catch (e) {
+                  setS(() => loading = false);
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur de connexion')));
+                }
+              },
+              child: loading ? SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) : Text('Se connecter'),
+            ),
+          ],
         ),
       ),
     );
@@ -1425,7 +2012,7 @@ class _ChatbotPageState extends State<ChatbotPage> {
   @override
   void initState() {
     super.initState();
-    _addBot('👋 Bonjour ! Je suis votre assistant IA SmartMedia.\n\nJe peux vous aider à :\n• Trouver des médias dans votre bibliothèque\n• Analyser et tagger vos fichiers\n• Répondre à vos questions\n\nQue puis-je faire pour vous ?');
+    _addBot('👋 Bonjour ! Je suis votre assistant IA SmartMedia.\n\nJe peux vous aider à :\n• Trouver des médias dans votre bibliothèque\n• Analyser et tagger vos fichiers avec MobileNet + CLIP\n• Recherche sémantique (ex: "chien qui court")\n• Répondre à vos questions\n\nQue puis-je faire pour vous ?');
   }
 
   void _addBot(String text) {
@@ -1498,22 +2085,27 @@ class _ChatbotPageState extends State<ChatbotPage> {
       return '📄 Vous avez $docs document${docs > 1 ? 's' : ''} dans votre bibliothèque.';
 
     if (q.contains('analyser') || q.contains('analyse') || q.contains('ia') || q.contains('intelligence'))
-      return '🤖 L\'IA a analysé $analyzed/$total médias.\n\nL\'analyse automatique s\'effectue quelques secondes après chaque upload. Les tags sont générés automatiquement selon le type de fichier.';
+      return '🤖 L\'IA a analysé $analyzed/$total médias.\n\nTechnologies utilisées :\n• MobileNetV3 — classification d\'images\n• OpenCV — extraction frames vidéo\n• CLIP (ViT-B/32) — embeddings image↔texte\n• FAISS — recherche vectorielle ultra-rapide\n• SentenceTransformers — embeddings texte\n\nTout fonctionne localement, sans API payante !';
 
     if (q.contains('cherche') || q.contains('trouve') || q.contains('search') || q.contains('recherch')) {
       final keyword = q.replaceAll(RegExp(r'(cherche|trouve|search|recherch[a-z]*)'), '').trim();
       if (keyword.isNotEmpty && widget.medias.isNotEmpty) {
         final found = widget.medias.where((m) =>
             (m['originalName'] ?? '').toLowerCase().contains(keyword) ||
-            (m['tags'] ?? []).join(' ').toLowerCase().contains(keyword)).toList();
+            (m['tags'] ?? []).join(' ').toLowerCase().contains(keyword) ||
+            (m['aiObjects'] ?? []).join(' ').toLowerCase().contains(keyword)).toList();
         if (found.isNotEmpty) {
-          final names = found.take(5).map((m) => '• ${m['originalName']}').join('\n');
-          return '🔍 Trouvé ${found.length} résultat${found.length > 1 ? 's' : ''} :\n\n$names';
+          final names = found.take(5).map((m) {
+            final objs = (m['aiObjects'] as List? ?? []);
+            final objStr = objs.isNotEmpty ? ' (${objs.take(2).join(', ')})' : '';
+            return '• ${m['originalName']}$objStr';
+          }).join('\n');
+          return '🔍 Trouvé ${found.length} résultat${found.length > 1 ? 's' : ''} :\n\n$names\n\n💡 Utilisez l\'onglet Recherche IA pour une recherche sémantique avancée.';
         } else {
-          return '🔍 Aucun média trouvé pour "$keyword".';
+          return '🔍 Aucun média trouvé pour "$keyword".\n\n💡 Essayez la recherche sémantique dans l\'onglet Recherche — elle comprend le sens, pas juste les mots exacts.';
         }
       }
-      return '🔍 Utilisez l\'onglet Recherche pour trouver vos fichiers par nom ou tag.';
+      return '🔍 Utilisez l\'onglet Recherche IA pour trouver vos fichiers par description (ex: "chien noir", "coucher de soleil").';
     }
 
     if (q.contains('supprimer') || q.contains('effacer') || q.contains('delete'))
@@ -1738,4 +2330,334 @@ PageRoute _fadeRoute(Widget page) {
     transitionsBuilder: (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
     transitionDuration: Duration(milliseconds: 300),
   );
+}
+
+// ══════════════════════════════════════════
+//  ADMIN DASHBOARD
+// ══════════════════════════════════════════
+class AdminDashboard extends StatefulWidget {
+  @override
+  _AdminDashboardState createState() => _AdminDashboardState();
+}
+
+class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStateMixin {
+  Map<String, dynamic> _stats = {};
+  List _users  = [];
+  List _medias = [];
+  bool _loading = true;
+  late TabController _tabCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabCtrl = TabController(length: 3, vsync: this);
+    _fetchAll();
+  }
+
+  @override
+  void dispose() { _tabCtrl.dispose(); super.dispose(); }
+
+  Future<String> _token() async {
+    final p = await SharedPreferences.getInstance();
+    return p.getString('token') ?? '';
+  }
+
+  Future<void> _fetchAll() async {
+    setState(() => _loading = true);
+    await Future.wait([_fetchStats(), _fetchUsers(), _fetchMedias()]);
+    setState(() => _loading = false);
+  }
+
+  Future<void> _fetchStats() async {
+    try {
+      final res = await http.get(Uri.parse('$baseUrl/api/admin/stats'),
+          headers: {'Authorization': 'Bearer ${await _token()}'}).timeout(Duration(seconds: 10));
+      if (res.statusCode == 200) setState(() => _stats = jsonDecode(res.body));
+    } catch (_) {}
+  }
+
+  Future<void> _fetchUsers() async {
+    try {
+      final res = await http.get(Uri.parse('$baseUrl/api/admin/users'),
+          headers: {'Authorization': 'Bearer ${await _token()}'}).timeout(Duration(seconds: 10));
+      if (res.statusCode == 200) setState(() => _users = jsonDecode(res.body));
+    } catch (_) {}
+  }
+
+  Future<void> _fetchMedias() async {
+    try {
+      final res = await http.get(Uri.parse('$baseUrl/api/admin/medias'),
+          headers: {'Authorization': 'Bearer ${await _token()}'}).timeout(Duration(seconds: 10));
+      if (res.statusCode == 200) setState(() => _medias = jsonDecode(res.body));
+    } catch (_) {}
+  }
+
+  Future<void> _toggleUser(Map u) async {
+    final newStatus = !(u['isActive'] == true);
+    final res = await http.put(
+      Uri.parse('$baseUrl/api/admin/users/${u['id']}'),
+      headers: {'Authorization': 'Bearer ${await _token()}', 'Content-Type': 'application/json'},
+      body: jsonEncode({'is_active': newStatus}),
+    );
+    if (res.statusCode == 200) _fetchUsers();
+  }
+
+  Future<void> _deleteUser(Map u) async {
+    final res = await http.delete(
+      Uri.parse('$baseUrl/api/admin/users/${u['id']}'),
+      headers: {'Authorization': 'Bearer ${await _token()}'},
+    );
+    if (res.statusCode == 200) _fetchUsers();
+  }
+
+  Future<void> _deleteMedia(Map m) async {
+    final res = await http.delete(
+      Uri.parse('$baseUrl/api/admin/medias/${m['id']}'),
+      headers: {'Authorization': 'Bearer ${await _token()}'},
+    );
+    if (res.statusCode == 200) _fetchMedias();
+  }
+
+  Future<void> _logout() async {
+    final p = await SharedPreferences.getInstance();
+    await p.clear();
+    Navigator.pushReplacement(context, _fadeRoute(LoginPage()));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.dark,
+      appBar: AppBar(
+        backgroundColor: AppColors.surface,
+        elevation: 0,
+        title: Row(children: [
+          Container(
+            padding: EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors: [AppColors.accent, AppColors.primary]),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(Icons.admin_panel_settings, color: Colors.white, size: 18),
+          ),
+          SizedBox(width: 10),
+          Text('Administration', style: AppTextStyles.title),
+        ]),
+        actions: [
+          IconButton(icon: Icon(Icons.refresh, color: Colors.white), onPressed: _fetchAll),
+          IconButton(icon: Icon(Icons.logout, color: AppColors.accent), onPressed: _logout),
+        ],
+        bottom: TabBar(
+          controller: _tabCtrl,
+          indicatorColor: AppColors.primary,
+          labelColor: AppColors.primary,
+          unselectedLabelColor: AppColors.textMuted,
+          tabs: [
+            Tab(icon: Icon(Icons.bar_chart), text: 'Stats'),
+            Tab(icon: Icon(Icons.people), text: 'Utilisateurs'),
+            Tab(icon: Icon(Icons.perm_media), text: 'Médias'),
+          ],
+        ),
+      ),
+      body: _loading
+          ? Center(child: CircularProgressIndicator(color: AppColors.primary))
+          : TabBarView(controller: _tabCtrl, children: [
+              _buildStats(),
+              _buildUsers(),
+              _buildMedias(),
+            ]),
+    );
+  }
+
+  // ── Stats ──────────────────────────────
+  Widget _buildStats() {
+    final items = [
+      {'icon': Icons.people, 'label': 'Utilisateurs', 'value': '${_stats['totalUsers'] ?? 0}', 'color': AppColors.primary},
+      {'icon': Icons.verified_user, 'label': 'Actifs', 'value': '${_stats['activeUsers'] ?? 0}', 'color': AppColors.success},
+      {'icon': Icons.admin_panel_settings, 'label': 'Admins', 'value': '${_stats['totalAdmins'] ?? 0}', 'color': AppColors.accent},
+      {'icon': Icons.photo_library, 'label': 'Médias', 'value': '${_stats['totalMedias'] ?? 0}', 'color': AppColors.secondary},
+      {'icon': Icons.auto_awesome, 'label': 'Analysés', 'value': '${_stats['analyzedMedias'] ?? 0}', 'color': AppColors.warning},
+      {'icon': Icons.storage, 'label': 'Stockage', 'value': '${_stats['totalStorage'] ?? '0 GB'}', 'color': AppColors.gradEnd},
+    ];
+    return SingleChildScrollView(
+      padding: EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SizedBox(height: 8),
+        Text('Vue globale', style: AppTextStyles.title),
+        SizedBox(height: 16),
+        GridView.builder(
+          shrinkWrap: true,
+          physics: NeverScrollableScrollPhysics(),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2, mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: 1.4,
+          ),
+          itemCount: items.length,
+          itemBuilder: (_, i) {
+            final item = items[i];
+            final color = item['color'] as Color;
+            return Container(
+              padding: EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: AppColors.darkCard,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: color.withOpacity(0.3)),
+              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Icon(item['icon'] as IconData, color: color, size: 24),
+                Spacer(),
+                Text(item['value'] as String, style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w800)),
+                Text(item['label'] as String, style: AppTextStyles.caption),
+              ]),
+            );
+          },
+        ),
+      ]),
+    );
+  }
+
+  // ── Utilisateurs ───────────────────────
+  Widget _buildUsers() {
+    return ListView.builder(
+      padding: EdgeInsets.all(16),
+      itemCount: _users.length,
+      itemBuilder: (_, i) {
+        final u = _users[i] as Map;
+        final isAdmin = u['role'] == 'admin';
+        final isActive = u['isActive'] == true;
+        return Container(
+          margin: EdgeInsets.only(bottom: 10),
+          padding: EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppColors.darkCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: isAdmin ? AppColors.accent.withOpacity(0.4) : Colors.white10),
+          ),
+          child: Row(children: [
+            CircleAvatar(
+              backgroundColor: isAdmin ? AppColors.accent.withOpacity(0.2) : AppColors.primary.withOpacity(0.2),
+              child: Icon(isAdmin ? Icons.admin_panel_settings : Icons.person,
+                  color: isAdmin ? AppColors.accent : AppColors.primary, size: 20),
+            ),
+            SizedBox(width: 12),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(u['email'] ?? '', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13),
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              SizedBox(height: 3),
+              Row(children: [
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: isAdmin ? AppColors.accent.withOpacity(0.2) : AppColors.primary.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(isAdmin ? 'Admin' : 'User',
+                      style: TextStyle(color: isAdmin ? AppColors.accent : AppColors.primary, fontSize: 10, fontWeight: FontWeight.w700)),
+                ),
+                SizedBox(width: 8),
+                Icon(Icons.circle, size: 7, color: isActive ? AppColors.success : AppColors.accent),
+                SizedBox(width: 4),
+                Text(isActive ? 'Actif' : 'Désactivé', style: AppTextStyles.caption.copyWith(fontSize: 10)),
+              ]),
+            ])),
+            if (!isAdmin) ...[
+              IconButton(
+                icon: Icon(isActive ? Icons.block : Icons.check_circle_outline,
+                    color: isActive ? AppColors.warning : AppColors.success, size: 20),
+                onPressed: () => _toggleUser(u),
+                tooltip: isActive ? 'Désactiver' : 'Activer',
+              ),
+              IconButton(
+                icon: Icon(Icons.delete_outline, color: AppColors.accent, size: 20),
+                onPressed: () => showDialog(
+                  context: context,
+                  builder: (_) => AlertDialog(
+                    backgroundColor: AppColors.darkCard,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    title: Text('Supprimer ?', style: TextStyle(color: Colors.white)),
+                    content: Text('Supprimer ${u['email']} ?', style: TextStyle(color: AppColors.textLight)),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(context), child: Text('Annuler')),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
+                        onPressed: () { Navigator.pop(context); _deleteUser(u); },
+                        child: Text('Supprimer'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ]),
+        );
+      },
+    );
+  }
+
+  // ── Médias ─────────────────────────────
+  Widget _buildMedias() {
+    return ListView.builder(
+      padding: EdgeInsets.all(16),
+      itemCount: _medias.length,
+      itemBuilder: (_, i) {
+        final m = _medias[i] as Map;
+        final type = m['type'] ?? 'document';
+        return Container(
+          margin: EdgeInsets.only(bottom: 10),
+          padding: EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: AppColors.darkCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white10),
+          ),
+          child: Row(children: [
+            Container(
+              width: 40, height: 40,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(colors: _typeGradient(type)),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(_typeIcon(type), color: Colors.white, size: 18),
+            ),
+            SizedBox(width: 12),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(m['originalName'] ?? '', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              Text('User ID: ${m['userId']} • ${_formatSizeAdmin(m['size'])}',
+                  style: AppTextStyles.caption.copyWith(fontSize: 10)),
+            ])),
+            IconButton(
+              icon: Icon(Icons.delete_outline, color: AppColors.accent, size: 20),
+              onPressed: () => _deleteMedia(m),
+            ),
+          ]),
+        );
+      },
+    );
+  }
+
+  IconData _typeIcon(String type) {
+    switch (type) {
+      case 'image': return Icons.image_outlined;
+      case 'video': return Icons.videocam_outlined;
+      case 'audio': return Icons.audiotrack_outlined;
+      default:      return Icons.insert_drive_file_outlined;
+    }
+  }
+
+  List<Color> _typeGradient(String type) {
+    switch (type) {
+      case 'image': return [Color(0xFF6C63FF), Color(0xFF9C63FF)];
+      case 'video': return [Color(0xFFFF6584), Color(0xFFFF8C69)];
+      case 'audio': return [Color(0xFF3ECFCF), Color(0xFF3E9FCF)];
+      default:      return [Color(0xFF4CAF50), Color(0xFF81C784)];
+    }
+  }
+
+  String _formatSizeAdmin(dynamic bytes) {
+    if (bytes == null) return '-';
+    final b = (bytes is int) ? bytes : (bytes as num).toInt();
+    if (b < 1024) return '$b B';
+    if (b < 1048576) return '${(b/1024).toStringAsFixed(1)} KB';
+    return '${(b/1048576).toStringAsFixed(2)} MB';
+  }
 }

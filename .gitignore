@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# Base de données et index IA (trop lourds pour GitHub)
+backend_python/smartmedia.db
+backend_python/faiss_clip.bin
+backend_python/faiss_text.bin
+backend_python/faiss_clip_meta.json
+backend_python/faiss_text_meta.json
+backend_python/uploads/
+
+# Flutter
+appwebsmart/build/
+appwebsmart/.dart_tool/
+appwebsmart/.flutter-plugins
+appwebsmart/.flutter-plugins-dependencies
+appwebsmart/pubspec.lock
+
+# VS Code
+.vscode/

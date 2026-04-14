@@ -1,0 +1,16 @@
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+python-jose[cryptography]==3.3.0
+bcrypt>=5.0.0
+sqlalchemy>=2.0.36
+aiosqlite>=0.20.0
+faiss-cpu==1.10.0
+sentence-transformers==3.0.0
+numpy>=1.26.4
+python-dotenv==1.0.1
+torch>=2.6.0
+torchvision>=0.21.0
+opencv-python-headless>=4.9.0.80
+Pillow>=10.3.0
+open-clip-torch>=2.24.0
