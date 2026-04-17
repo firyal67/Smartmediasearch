@@ -38,7 +38,34 @@ async def lifespan(app: FastAPI):
         else:
             print(f"ℹ️  Admin existe déjà : {admin_email}")
 
+    # Pré-charger les modèles IA en arrière-plan
+    import asyncio
+    asyncio.create_task(_preload_models())
+
     yield
+
+
+async def _preload_models():
+    import asyncio
+    loop = asyncio.get_running_loop()
+    print("⏳ Pré-chargement des modèles IA...")
+    try:
+        await loop.run_in_executor(None, _load_models)
+        print("✅ Modèles IA chargés et prêts")
+    except Exception as e:
+        print(f"⚠️  Erreur chargement modèles: {e}")
+
+
+def _load_models():
+    try:
+        from faiss_index import _st, _clip_idx, _text_idx
+        _st()        # sentence-transformers
+        _clip_idx()  # FAISS CLIP index
+        _text_idx()  # FAISS text index
+        from ai_analyzer import get_clip_text_embedding
+        get_clip_text_embedding("test")  # charge CLIP
+    except Exception as e:
+        print(f"⚠️  Modèle partiel: {e}")
 
 
 app = FastAPI(title="SmartMedia API", lifespan=lifespan)
@@ -51,7 +78,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-upload_dir = os.getenv("UPLOAD_DIR", "uploads")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+upload_dir = os.getenv("UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
 os.makedirs(upload_dir, exist_ok=True)
 
 # Route manuelle pour servir les uploads avec CORS

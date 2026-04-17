@@ -4,6 +4,10 @@ __pycache__/
 *.pyo
 .env
 
+# Environnements virtuels
+backend_python/.venv/
+backend_python/.venv_win/
+
 # Base de données et index IA (trop lourds pour GitHub)
 backend_python/smartmedia.db
 backend_python/faiss_clip.bin

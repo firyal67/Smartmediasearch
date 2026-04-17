@@ -2,6 +2,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -11,12 +12,17 @@ import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 
 // ══════════════════════════════════════════
-//  CONFIGURATION — changez l'URL ici
+//  CONFIGURATION — changez l'URL ici si besoin
 //  Émulateur Android : 'http://10.0.2.2:5000'
 //  Vrai téléphone    : 'http://192.168.X.X:5000'
-//  Chrome / Web      : 'http://localhost:5000'
+//  Chrome / Web      : 'http://127.0.0.1:5000'
+//  Windows / Linux   : 'http://127.0.0.1:5000'
 // ══════════════════════════════════════════
-const String baseUrl = 'http://192.168.100.208:5000';
+final String baseUrl = kIsWeb
+    ? 'http://192.168.1.162:5000'
+    : (defaultTargetPlatform == TargetPlatform.android
+        ? 'http://192.168.1.162:5000'
+        : 'http://192.168.1.162:5000');
 
 // ══════════════════════════════════════════
 //  DESIGN TOKENS
@@ -213,7 +219,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
         _showSnack('Email ou mot de passe incorrect', isError: true);
       }
     } catch (e) {
-      _showSnack('Erreur de connexion. Vérifiez l\'URL du serveur.', isError: true);
+      _showSnack('Erreur de connexion. Vérifiez l\'URL du serveur. $e', isError: true);
     }
     setState(() => _loading = false);
   }
@@ -596,7 +602,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       final token = prefs.getString('token') ?? '';
       final uri = Uri.parse('$baseUrl/api/media/search').replace(queryParameters: {'q': query});
       final res = await http.get(uri, headers: {'Authorization': 'Bearer $token'})
-          .timeout(Duration(seconds: 20));
+          .timeout(Duration(seconds: 60));
       if (res.statusCode == 200) {
         setState(() => _searchResults = jsonDecode(res.body));
       }
@@ -604,9 +610,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       _showSnack('Erreur recherche: $e', isError: true);
     }
     setState(() => _searchLoading = false);
-  }
-
-  // ─── UPLOAD ─────────────────────────────
+  }  // ─── UPLOAD ─────────────────────────────
   // Utilise fromBytes() → compatible Web (Chrome) + Mobile + Desktop
   Future<void> _uploadFileBytes(Uint8List bytes, String fileName, String mimeType) async {
     setState(() => _uploading = true);
@@ -670,11 +674,22 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
         onPickVideo: () async {
           Navigator.pop(context);
           try {
-            final picker = ImagePicker();
-            final xFile = await picker.pickVideo(source: ImageSource.gallery);
-            if (xFile != null) {
-              final bytes = await xFile.readAsBytes();
-              await _uploadFileBytes(bytes, xFile.name, 'video/mp4');
+            final result = await FilePicker.platform.pickFiles(
+              type: FileType.custom,
+              allowedExtensions: ['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv', 'm4v'],
+              withData: true,
+            );
+            if (result != null) {
+              final f = result.files.single;
+              final bytes = f.bytes ?? Uint8List(0);
+              if (bytes.isNotEmpty) {
+                final ext = (f.extension ?? 'mp4').toLowerCase();
+                final mime = ext == 'webm' ? 'video/webm'
+                    : ext == 'mov' ? 'video/quicktime'
+                    : ext == 'avi' ? 'video/avi'
+                    : 'video/mp4';
+                await _uploadFileBytes(bytes, f.name, mime);
+              }
             }
           } catch (e) {
             _showSnack('Impossible d\'accéder aux vidéos: $e', isError: true);
@@ -1436,110 +1451,121 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   // ─── SEARCH TAB ─────────────────────────
   Widget _buildSearchTab() {
     final localMedias = _filteredMedias();
-    final displayList = (_semanticMode && _search.isNotEmpty) ? _searchResults : localMedias;
+    final displayList = (_semanticMode && _search.isNotEmpty)
+        ? _searchResults
+        : (_search.isNotEmpty ? localMedias : _allMedias);
 
     return SafeArea(
       child: Column(children: [
         Padding(
-          padding: EdgeInsets.fromLTRB(16, 20, 16, 0),
+          padding: EdgeInsets.fromLTRB(16, 20, 16, 12),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('Recherche IA', style: AppTextStyles.headline.copyWith(fontSize: 24)),
             SizedBox(height: 4),
-            Text('Recherche sémantique par CLIP + FAISS', style: AppTextStyles.caption),
-            SizedBox(height: 16),
-            // Toggle mode
+            Text('Décrivez une couleur, un thème, un objet…', style: AppTextStyles.caption),
+            SizedBox(height: 14),
             Row(children: [
-              GestureDetector(
-                onTap: () => setState(() => _semanticMode = true),
-                child: AnimatedContainer(
-                  duration: Duration(milliseconds: 200),
-                  padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  decoration: BoxDecoration(
-                    gradient: _semanticMode ? LinearGradient(colors: [AppColors.primary, AppColors.secondary]) : null,
-                    color: _semanticMode ? null : AppColors.darkCard,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: _semanticMode ? Colors.transparent : Colors.white12),
+              _modeChip('IA Sémantique', Icons.auto_awesome, true),
+              SizedBox(width: 8),
+              _modeChip('Filtre local', Icons.filter_list, false),
+            ]),
+            SizedBox(height: 12),
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: _searchCtrl,
+                  autofocus: false,
+                  textInputAction: TextInputAction.search,
+                  onChanged: (v) => setState(() => _search = v),
+                  onSubmitted: (v) {
+                    if (v.trim().isNotEmpty) _semanticSearch(v.trim());
+                  },
+                  style: TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: _semanticMode
+                        ? 'Ex: personnage, fruit rouge, plage…'
+                        : 'Nom, tag, type…',
+                    prefixIcon: Icon(Icons.search),
+                    suffixIcon: _search.isNotEmpty
+                        ? IconButton(
+                            icon: Icon(Icons.clear, color: AppColors.textMuted),
+                            onPressed: () {
+                              _searchCtrl.clear();
+                              setState(() { _search = ''; _searchResults = []; });
+                            },
+                          )
+                        : null,
                   ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.auto_awesome, size: 14, color: _semanticMode ? Colors.white : AppColors.textMuted),
-                    SizedBox(width: 6),
-                    Text('IA Sémantique', style: TextStyle(
-                      color: _semanticMode ? Colors.white : AppColors.textMuted,
-                      fontSize: 12, fontWeight: FontWeight.w600,
-                    )),
-                  ]),
                 ),
               ),
-              SizedBox(width: 8),
+              SizedBox(width: 10),
               GestureDetector(
-                onTap: () => setState(() => _semanticMode = false),
-                child: AnimatedContainer(
-                  duration: Duration(milliseconds: 200),
-                  padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                onTap: () {
+                  if (_search.trim().isNotEmpty) _semanticSearch(_search.trim());
+                },
+                child: Container(
+                  padding: EdgeInsets.all(14),
                   decoration: BoxDecoration(
-                    color: !_semanticMode ? AppColors.darkCard.withOpacity(0.9) : AppColors.darkCard,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: !_semanticMode ? AppColors.secondary.withOpacity(0.6) : Colors.white12),
+                    gradient: LinearGradient(colors: [AppColors.primary, AppColors.secondary]),
+                    borderRadius: BorderRadius.circular(14),
                   ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.filter_list, size: 14, color: !_semanticMode ? AppColors.secondary : AppColors.textMuted),
-                    SizedBox(width: 6),
-                    Text('Filtre local', style: TextStyle(
-                      color: !_semanticMode ? AppColors.secondary : AppColors.textMuted,
-                      fontSize: 12, fontWeight: FontWeight.w600,
-                    )),
-                  ]),
+                  child: Icon(Icons.search, color: Colors.white, size: 22),
                 ),
               ),
             ]),
-            SizedBox(height: 12),
-            TextField(
-              controller: _searchCtrl,
-              autofocus: false,
-              onChanged: (v) {
-                setState(() => _search = v);
-                if (_semanticMode) _semanticSearch(v);
-              },
-              onSubmitted: (v) { if (_semanticMode) _semanticSearch(v); },
-              style: TextStyle(color: Colors.white),
-              decoration: InputDecoration(
-                hintText: _semanticMode ? 'Ex: chien qui court, match de football…' : 'Nom, tag, type…',
-                prefixIcon: Icon(Icons.search),
-                suffixIcon: _search.isNotEmpty
-                    ? IconButton(
-                        icon: Icon(Icons.clear, color: AppColors.textMuted),
-                        onPressed: () {
-                          _searchCtrl.clear();
-                          setState(() { _search = ''; _searchResults = []; });
-                        },
-                      )
-                    : null,
-              ),
-            ),
           ]),
         ),
-        if (!_semanticMode) ...[
-          _buildFilterChips(),
-          SizedBox(height: 8),
-        ] else
-          SizedBox(height: 12),
-        // Résultats
+        if (!_semanticMode) _buildFilterChips(),
+        SizedBox(height: 8),
         Expanded(
           child: _searchLoading
               ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                   CircularProgressIndicator(color: AppColors.primary),
                   SizedBox(height: 12),
-                  Text('Recherche sémantique en cours…', style: AppTextStyles.caption),
+                  Text('Recherche IA en cours…', style: AppTextStyles.caption),
+                  SizedBox(height: 4),
+                  Text('Analyse CLIP + FAISS', style: AppTextStyles.caption.copyWith(fontSize: 10)),
                 ]))
               : displayList.isEmpty
                   ? _buildSearchEmptyState()
-                  : ListView.builder(
-                      padding: EdgeInsets.symmetric(horizontal: 16),
+                  : GridView.builder(
+                      padding: EdgeInsets.fromLTRB(16, 0, 16, 80),
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 2,
+                        mainAxisSpacing: 14,
+                        crossAxisSpacing: 14,
+                        childAspectRatio: 0.85,
+                      ),
                       itemCount: displayList.length,
-                      itemBuilder: (_, i) => _buildSearchResultTile(displayList[i]),
+                      itemBuilder: (_, i) => _buildMediaCard(displayList[i]),
                     ),
         ),
       ]),
+    );
+  }
+
+  Widget _modeChip(String label, IconData icon, bool isSemanticChip) {
+    final selected = _semanticMode == isSemanticChip;
+    return GestureDetector(
+      onTap: () => setState(() { _semanticMode = isSemanticChip; _searchResults = []; }),
+      child: AnimatedContainer(
+        duration: Duration(milliseconds: 200),
+        padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          gradient: selected ? LinearGradient(colors: [AppColors.primary, AppColors.secondary]) : null,
+          color: selected ? null : AppColors.darkCard,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: selected ? Colors.transparent : Colors.white12),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 14, color: selected ? Colors.white : AppColors.textMuted),
+          SizedBox(width: 6),
+          Text(label, style: TextStyle(
+            color: selected ? Colors.white : AppColors.textMuted,
+            fontSize: 12, fontWeight: FontWeight.w600,
+          )),
+        ]),
+      ),
     );
   }
 

@@ -21,7 +21,8 @@ MAX_SIZE   = 50 * 1024 * 1024
 
 ALLOWED_MIMETYPES = {
     "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp",
-    "video/mp4", "video/mov", "video/quicktime", "video/avi",
+    "video/mp4", "video/mov", "video/quicktime", "video/avi", "video/webm",
+    "video/x-msvideo", "video/x-matroska", "video/wmv", "video/x-ms-wmv",
     "audio/mpeg", "audio/mp3", "audio/wav", "audio/ogg", "audio/x-wav",
     "application/pdf", "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -34,6 +35,9 @@ EXT_MAP = {
     "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
     "image/gif": ".gif", "image/webp": ".webp",
     "video/mp4": ".mp4", "video/mov": ".mov", "video/quicktime": ".mov",
+    "video/avi": ".avi", "video/x-msvideo": ".avi",
+    "video/webm": ".webm", "video/x-matroska": ".mkv",
+    "video/wmv": ".wmv", "video/x-ms-wmv": ".wmv",
     "audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav",
     "audio/ogg": ".ogg", "application/pdf": ".pdf",
     "application/msword": ".doc",
@@ -74,7 +78,7 @@ def _media_to_dict(m: Media, score: float | None = None) -> dict:
 async def _analyze_later(media_id, file_path, media_type, original_name, db_factory):
     await asyncio.sleep(1)
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if media_type == "image":
             result = await loop.run_in_executor(None, _run_image, file_path)
         elif media_type == "video":
@@ -83,7 +87,8 @@ async def _analyze_later(media_id, file_path, media_type, original_name, db_fact
             result = {"objects": [media_type], "confidence": 1.0, "embedding": []}
 
         objects = result.get("objects", [])
-        tags = list(dict.fromkeys(objects + [media_type, "IA_analysed"]))
+        semantic_tags = result.get("semantic_tags", [])
+        tags = list(dict.fromkeys(objects + semantic_tags + [media_type, "IA_analysed"]))
 
         async with db_factory() as db:
             res = await db.execute(select(Media).where(Media.id == media_id))
@@ -94,7 +99,8 @@ async def _analyze_later(media_id, file_path, media_type, original_name, db_fact
                 media.ai_objects = json.dumps(objects)
                 media.ai_confidence = result.get("confidence", 0.0)
                 await db.commit()
-                text = f"{original_name} {media_type} {' '.join(tags)}"
+                # Texte enrichi avec semantic_tags pour FAISS
+                text = f"{original_name} {media_type} {' '.join(tags)} {' '.join(semantic_tags)}"
                 faiss_index.add_media(media_id, media.user_id, text, result.get("embedding", []))
     except Exception as e:
         print(f"❌ Analyse IA erreur: {e}")
@@ -187,15 +193,19 @@ async def search_media(
 ):
     uid = user["id"]
 
-    # 1. Recherche sémantique FAISS
-    loop = asyncio.get_event_loop()
+    # 1. Recherche sémantique FAISS (CLIP + sentence-transformers)
+    loop = asyncio.get_running_loop()
     hits = await loop.run_in_executor(None, faiss_index.search_media, uid, q)
     score_map = {h["media_id"]: h["score"] for h in hits} if hits else {}
 
-    # 2. Recherche par nom / description / tags (fallback + complément)
+    # 2. Recherche exacte par nom / description / tags / objets IA
     q_lower = q.lower()
     all_medias_res = await db.execute(select(Media).where(Media.user_id == uid))
     all_medias = all_medias_res.scalars().all()
+
+    # Importer la traduction
+    from faiss_index import _translate_query
+    q_en = _translate_query(q).lower()
 
     name_matches = {}
     for m in all_medias:
@@ -203,24 +213,86 @@ async def search_media(
         desc = (m.description or "").lower()
         tags = " ".join(json.loads(m.tags) if m.tags else []).lower()
         objs = " ".join(json.loads(m.ai_objects) if m.ai_objects else []).lower()
-        if q_lower in name or q_lower in desc or q_lower in tags or q_lower in objs:
-            # Score 1.0 si correspondance exacte dans le nom
-            name_matches[m.id] = 1.0 if q_lower in name else 0.7
+        combined = f"{name} {desc} {tags} {objs}"
+        # Chercher avec le terme français ET sa traduction anglaise
+        match_fr = q_lower in combined
+        match_en = any(word in combined for word in q_en.split() if len(word) > 2)
+        if match_fr or match_en:
+            score = 1.0 if q_lower in name else (0.9 if match_en and any(word in objs for word in q_en.split() if len(word) > 2) else 0.75)
+            name_matches[m.id] = score
 
-    # Fusionner les deux résultats
-    merged = {**name_matches, **score_map}  # FAISS écrase si meilleur score
+    # Fusion : FAISS sémantique prioritaire, exact en complément
+    # On prend le max des deux scores pour chaque média
+    merged = {}
+    all_ids = set(name_matches.keys()) | set(score_map.keys())
+    for mid in all_ids:
+        merged[mid] = max(name_matches.get(mid, 0.0), score_map.get(mid, 0.0))
+
     if not merged:
         return []
 
     result = await db.execute(select(Media).where(Media.id.in_(merged.keys()), Media.user_id == uid))
     medias = sorted(result.scalars().all(), key=lambda m: merged.get(m.id, 0), reverse=True)
-    return [_media_to_dict(m, score=merged.get(m.id)) for m in medias]
+    return [_media_to_dict(m, score=round(merged.get(m.id, 0.0), 4)) for m in medias]
 
 
 from pydantic import BaseModel
 
 class DescriptionBody(BaseModel):
     description: str
+
+
+@router.post("/reindex")
+async def reindex_all(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Réanalyse et réindexe tous les médias avec CLIP semantic tags."""
+    uid = user["id"]
+    result = await db.execute(select(Media).where(Media.user_id == uid))
+    medias = result.scalars().all()
+    loop = asyncio.get_running_loop()
+    count = 0
+
+    for m in medias:
+        try:
+            clip_emb = []
+            semantic_tags = []
+
+            if m.file_path and os.path.exists(m.file_path):
+                if m.type == "image":
+                    res = await loop.run_in_executor(None, _run_image, m.file_path)
+                    clip_emb = res.get("embedding", [])
+                    semantic_tags = res.get("semantic_tags", [])
+                    objects = res.get("objects", [])
+                    # Mettre à jour les tags enrichis en DB
+                    new_tags = list(dict.fromkeys(objects + semantic_tags + [m.type, "IA_analysed"]))
+                    m.analyzed = True
+                    m.tags = json.dumps(new_tags)
+                    m.ai_objects = json.dumps(objects)
+                    m.ai_confidence = res.get("confidence", 0.0)
+                elif m.type == "video":
+                    res = await loop.run_in_executor(None, _run_video, m.file_path)
+                    clip_emb = res.get("embedding", [])
+                    semantic_tags = res.get("semantic_tags", [])
+                    objects = res.get("objects", [])
+                    new_tags = list(dict.fromkeys(objects + semantic_tags + [m.type, "IA_analysed"]))
+                    m.analyzed = True
+                    m.tags = json.dumps(new_tags)
+                    m.ai_objects = json.dumps(objects)
+
+            # Texte enrichi : nom + type + description + objets + semantic_tags
+            existing_tags = json.loads(m.tags) if m.tags else []
+            text = f"{m.original_name} {m.type} {m.description or ''} {' '.join(existing_tags)} {' '.join(semantic_tags)}"
+            faiss_index.remove_media(m.id)
+            faiss_index.add_media(m.id, uid, text, clip_emb)
+            count += 1
+            print(f"✅ Réindexé: {m.original_name} | semantic: {semantic_tags[:3]}")
+        except Exception as e:
+            print(f"[reindex] media {m.id} ({m.original_name}): {e}")
+
+    await db.commit()
+    return {"msg": f"{count} médias réindexés avec semantic tags CLIP"}
 
 
 @router.patch("/{media_id}/favorite")
