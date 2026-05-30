@@ -203,9 +203,9 @@ async def search_media(
     all_medias_res = await db.execute(select(Media).where(Media.user_id == uid))
     all_medias = all_medias_res.scalars().all()
 
-    # Importer la traduction
-    from faiss_index import _translate_query
-    q_en = _translate_query(q).lower()
+    # Traduction FR→EN pour matcher les tags anglais
+    from faiss_index import _build_clip_query
+    q_en = _build_clip_query(q).lower().replace("a photo of ", "")
 
     name_matches = {}
     for m in all_medias:
@@ -214,7 +214,6 @@ async def search_media(
         tags = " ".join(json.loads(m.tags) if m.tags else []).lower()
         objs = " ".join(json.loads(m.ai_objects) if m.ai_objects else []).lower()
         combined = f"{name} {desc} {tags} {objs}"
-        # Chercher avec le terme français ET sa traduction anglaise
         match_fr = q_lower in combined
         match_en = any(word in combined for word in q_en.split() if len(word) > 2)
         if match_fr or match_en:
@@ -227,6 +226,9 @@ async def search_media(
     all_ids = set(name_matches.keys()) | set(score_map.keys())
     for mid in all_ids:
         merged[mid] = max(name_matches.get(mid, 0.0), score_map.get(mid, 0.0))
+
+    # Filtrer les résultats non pertinents (score trop bas)
+    merged = {mid: s for mid, s in merged.items() if s >= 0.25}
 
     if not merged:
         return []

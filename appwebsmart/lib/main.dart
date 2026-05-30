@@ -19,10 +19,10 @@ import 'package:file_picker/file_picker.dart';
 //  Windows / Linux   : 'http://127.0.0.1:5000'
 // ══════════════════════════════════════════
 final String baseUrl = kIsWeb
-    ? 'http://192.168.1.162:5000'
+    ? 'http://localhost:5000'
     : (defaultTargetPlatform == TargetPlatform.android
         ? 'http://192.168.1.162:5000'
-        : 'http://192.168.1.162:5000');
+        : 'http://localhost:5000');
 
 // ══════════════════════════════════════════
 //  DESIGN TOKENS
@@ -144,19 +144,7 @@ class SmartMediaApp extends StatelessWidget {
 class AuthCheck extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder(
-      future: SharedPreferences.getInstance(),
-      builder: (context, snapshot) {
-        if (!snapshot.hasData) {
-          return Scaffold(
-            backgroundColor: AppColors.dark,
-            body: Center(child: CircularProgressIndicator(color: AppColors.primary)),
-          );
-        }
-        if (snapshot.data!.getString('token') != null) return Dashboard();
-        return LoginPage();
-      },
-    );
+    return LoginPage();
   }
 }
 
@@ -169,8 +157,8 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
-  final _emailCtrl    = TextEditingController(text: 'demo@smartmedia.com');
-  final _passCtrl     = TextEditingController(text: 'demo123');
+  final _emailCtrl    = TextEditingController();
+  final _passCtrl     = TextEditingController();
   bool _loading       = false;
   bool _obscure       = true;
   bool _rememberMe    = false;
@@ -536,7 +524,14 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   // Recherche sémantique FAISS
   List _searchResults    = [];
   bool _searchLoading    = false;
-  bool _semanticMode     = false; // false = local, true = FAISS
+  bool _semanticMode     = true; // true = FAISS par défaut
+
+  // Historique des recherches
+  List<Map<String, dynamic>> _searchHistory = [];
+
+  // Upload progress
+  String _uploadStatus   = '';
+  double _uploadProgress = 0.0;
 
   late TabController _tabCtrl;
   final _searchCtrl = TextEditingController();
@@ -544,9 +539,10 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _tabCtrl = TabController(length: 3, vsync: this);
+    _tabCtrl = TabController(length: 4, vsync: this);
     _tabCtrl.addListener(() => setState(() => _currentTab = _tabCtrl.index));
     _fetchAll();
+    _loadSearchHistory();
   }
 
   @override
@@ -590,6 +586,39 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     } catch (_) {}
   }
 
+  // ─── HISTORIQUE DES RECHERCHES ──────────
+  Future<void> _loadSearchHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList('search_history') ?? [];
+    setState(() {
+      _searchHistory = raw.map((e) => Map<String, dynamic>.from(jsonDecode(e))).toList();
+    });
+  }
+
+  Future<void> _saveSearchToHistory(String query, int resultCount) async {
+    final prefs = await SharedPreferences.getInstance();
+    final entry = {
+      'query': query,
+      'timestamp': DateTime.now().toIso8601String(),
+      'resultCount': resultCount,
+    };
+    // Éviter les doublons consécutifs
+    if (_searchHistory.isNotEmpty && _searchHistory.first['query'] == query) return;
+    _searchHistory.insert(0, entry);
+    if (_searchHistory.length > 10) _searchHistory = _searchHistory.take(10).toList();
+    await prefs.setStringList(
+      'search_history',
+      _searchHistory.map((e) => jsonEncode(e)).toList(),
+    );
+    setState(() {});
+  }
+
+  Future<void> _clearSearchHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('search_history');
+    setState(() => _searchHistory = []);
+  }
+
   // ─── RECHERCHE SÉMANTIQUE FAISS ─────────
   Future<void> _semanticSearch(String query) async {
     if (query.trim().isEmpty) {
@@ -604,7 +633,9 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       final res = await http.get(uri, headers: {'Authorization': 'Bearer $token'})
           .timeout(Duration(seconds: 60));
       if (res.statusCode == 200) {
-        setState(() => _searchResults = jsonDecode(res.body));
+        final results = jsonDecode(res.body) as List;
+        setState(() => _searchResults = results);
+        await _saveSearchToHistory(query, results.length);
       }
     } catch (e) {
       _showSnack('Erreur recherche: $e', isError: true);
@@ -613,7 +644,11 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   }  // ─── UPLOAD ─────────────────────────────
   // Utilise fromBytes() → compatible Web (Chrome) + Mobile + Desktop
   Future<void> _uploadFileBytes(Uint8List bytes, String fileName, String mimeType) async {
-    setState(() => _uploading = true);
+    setState(() {
+      _uploading = true;
+      _uploadProgress = 0.0;
+      _uploadStatus = 'Envoi du fichier…';
+    });
     try {
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('token') ?? '';
@@ -625,8 +660,11 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
         filename: fileName,
         contentType: MediaType.parse(mimeType),
       ));
-      final streamed = await req.send().timeout(Duration(seconds: 60));
+      setState(() { _uploadProgress = 0.3; _uploadStatus = 'Upload en cours…'; });
+      final streamed = await req.send().timeout(Duration(seconds: 120));
+      setState(() { _uploadProgress = 0.7; _uploadStatus = 'Analyse IA en cours…'; });
       final res = await http.Response.fromStream(streamed);
+      setState(() { _uploadProgress = 1.0; _uploadStatus = 'Terminé ✓'; });
       if (res.statusCode == 200 || res.statusCode == 201) {
         _showSnack('Fichier uploadé avec succès ✓', isError: false);
         await _fetchAll();
@@ -636,7 +674,8 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     } catch (e) {
       _showSnack('Erreur: $e', isError: true);
     }
-    setState(() => _uploading = false);
+    await Future.delayed(Duration(seconds: 1));
+    setState(() { _uploading = false; _uploadProgress = 0.0; _uploadStatus = ''; });
   }
 
   void _showUploadDialog() {
@@ -841,16 +880,61 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.dark,
-      body: _loading
-          ? _buildLoader()
-          : IndexedStack(
-              index: _currentTab,
-              children: [
-                _buildHomeTab(),
-                _buildSearchTab(),
-                _buildChatbotTab(),
-              ],
+      body: Stack(
+        children: [
+          _loading
+              ? _buildLoader()
+              : IndexedStack(
+                  index: _currentTab,
+                  children: [
+                    _buildHomeTab(),
+                    _buildSearchTab(),
+                    _buildChatbotTab(),
+                    _buildHistoryTab(),
+                  ],
+                ),
+          // ── Barre de progression upload (Figure 3.10) ──
+          if (_uploading)
+            Positioned(
+              bottom: 80, left: 16, right: 16,
+              child: Container(
+                padding: EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: AppColors.darkCard,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppColors.primary.withOpacity(0.4)),
+                  boxShadow: [BoxShadow(color: Colors.black45, blurRadius: 12)],
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    SizedBox(
+                      width: 18, height: 18,
+                      child: CircularProgressIndicator(color: AppColors.primary, strokeWidth: 2),
+                    ),
+                    SizedBox(width: 10),
+                    Expanded(child: Text(_uploadStatus, style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600))),
+                    Text('${(_uploadProgress * 100).toInt()}%', style: TextStyle(color: AppColors.primary, fontWeight: FontWeight.w800)),
+                  ]),
+                  SizedBox(height: 10),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: _uploadProgress,
+                      backgroundColor: Colors.white12,
+                      valueColor: AlwaysStoppedAnimation(AppColors.primary),
+                      minHeight: 6,
+                    ),
+                  ),
+                  if (_uploadProgress >= 0.7 && _uploadProgress < 1.0) ...[
+                    SizedBox(height: 8),
+                    Text('Analyse IA en arrière-plan (CLIP + MobileNet)…',
+                        style: TextStyle(color: AppColors.textMuted, fontSize: 11)),
+                  ],
+                ]),
+              ),
             ),
+        ],
+      ),
       bottomNavigationBar: _buildBottomNav(),
       floatingActionButton: _currentTab == 0
           ? _buildFAB()
@@ -897,17 +981,17 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
         medias.isEmpty
             ? SliverFillRemaining(child: _buildEmptyState())
             : SliverPadding(
-                padding: EdgeInsets.fromLTRB(16, 0, 16, 100),
+                padding: EdgeInsets.fromLTRB(10, 0, 10, 100),
                 sliver: SliverGrid(
                   delegate: SliverChildBuilderDelegate(
                     (ctx, i) => _buildMediaCard(medias[i]),
                     childCount: medias.length,
                   ),
                   gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 2,
-                    mainAxisSpacing: 14,
-                    crossAxisSpacing: 14,
-                    childAspectRatio: 0.85,
+                    crossAxisCount: 3,
+                    mainAxisSpacing: 8,
+                    crossAxisSpacing: 8,
+                    childAspectRatio: 0.82,
                   ),
                 ),
               ),
@@ -1066,7 +1150,9 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     final isImage     = type == 'image';
     final mediaId     = (m['_id'] ?? m['id'] ?? '').toString();
 
-    return ClipRRect(
+    return GestureDetector(
+      onTap: () => _showMediaDetail(m),
+      child: ClipRRect(
       borderRadius: BorderRadius.circular(20),
       child: Stack(fit: StackFit.expand, children: [
 
@@ -1206,7 +1292,8 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
           ]),
         ),
       ]),
-    );
+    ),  // fin ClipRRect
+    );  // fin GestureDetector
   }
 
   Widget _actionBtn(IconData icon, Color color, VoidCallback onTap) {
@@ -1451,7 +1538,8 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   // ─── SEARCH TAB ─────────────────────────
   Widget _buildSearchTab() {
     final localMedias = _filteredMedias();
-    final displayList = (_semanticMode && _search.isNotEmpty)
+    // Afficher les résultats sémantiques s'ils existent, sinon filtre local
+    final displayList = _searchResults.isNotEmpty
         ? _searchResults
         : (_search.isNotEmpty ? localMedias : _allMedias);
 
@@ -1461,8 +1549,6 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
           padding: EdgeInsets.fromLTRB(16, 20, 16, 12),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('Recherche IA', style: AppTextStyles.headline.copyWith(fontSize: 24)),
-            SizedBox(height: 4),
-            Text('Décrivez une couleur, un thème, un objet…', style: AppTextStyles.caption),
             SizedBox(height: 14),
             Row(children: [
               _modeChip('IA Sémantique', Icons.auto_awesome, true),
@@ -1483,8 +1569,8 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
                   style: TextStyle(color: Colors.white),
                   decoration: InputDecoration(
                     hintText: _semanticMode
-                        ? 'Ex: personnage, fruit rouge, plage…'
-                        : 'Nom, tag, type…',
+                        ? 'Rechercher…'
+                        : 'Rechercher…',
                     prefixIcon: Icon(Icons.search),
                     suffixIcon: _search.isNotEmpty
                         ? IconButton(
@@ -1531,13 +1617,13 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
                   : GridView.builder(
                       padding: EdgeInsets.fromLTRB(16, 0, 16, 80),
                       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 2,
-                        mainAxisSpacing: 14,
-                        crossAxisSpacing: 14,
-                        childAspectRatio: 0.85,
+                        crossAxisCount: 3,
+                        mainAxisSpacing: 8,
+                        crossAxisSpacing: 8,
+                        childAspectRatio: 0.78,
                       ),
                       itemCount: displayList.length,
-                      itemBuilder: (_, i) => _buildMediaCard(displayList[i]),
+                      itemBuilder: (_, i) => _buildSearchResultCard(displayList[i]),
                     ),
         ),
       ]),
@@ -1575,13 +1661,6 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
         Icon(Icons.image_search, size: 56, color: AppColors.primary.withOpacity(0.5)),
         SizedBox(height: 16),
         Text('Recherche intelligente', style: AppTextStyles.title),
-        SizedBox(height: 8),
-        Text(
-          _semanticMode
-              ? 'Décrivez ce que vous cherchez\nEx: "chien noir", "coucher de soleil"'
-              : 'Tapez un nom ou un tag',
-          style: AppTextStyles.caption, textAlign: TextAlign.center,
-        ),
       ]));
     }
     return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -1589,6 +1668,123 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       SizedBox(height: 12),
       Text('Aucun résultat pour "$_search"', style: AppTextStyles.caption),
     ]));
+  }
+
+  // ─── CARTE RÉSULTAT RECHERCHE (Figure 4.5) ──
+  Widget _buildSearchResultCard(Map m) {
+    final type       = m['type'] ?? 'document';
+    final name       = m['originalName'] ?? 'Sans nom';
+    final score      = (m['similarityScore'] as num?)?.toDouble();
+    final analyzed   = m['analyzed'] == true;
+    final previewUrl = _previewUrl(m);
+    final isImage    = type == 'image';
+    final mediaId    = (m['_id'] ?? m['id'] ?? '').toString();
+
+    // Couleur du badge selon le score
+    Color scoreColor = AppColors.textMuted;
+    if (score != null) {
+      if (score >= 0.8) scoreColor = AppColors.success;
+      else if (score >= 0.5) scoreColor = AppColors.warning;
+      else scoreColor = AppColors.secondary;
+    }
+
+    return GestureDetector(
+      onTap: () => _showMediaDetail(m),
+      child: Container(
+        decoration: BoxDecoration(
+          color: AppColors.darkCard,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: score != null
+                ? scoreColor.withOpacity(0.5)
+                : Colors.white10,
+            width: 1.5,
+          ),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // ── Miniature ──────────────────────
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+              child: Stack(fit: StackFit.expand, children: [
+                isImage && previewUrl != null
+                    ? Image.network(previewUrl, fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => _fullIconPreview(type))
+                    : _fullIconPreview(type),
+                // Badge type non-image
+                if (!isImage)
+                  Positioned(
+                    top: 8, left: 8,
+                    child: Container(
+                      padding: EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(_typeIcon(type), color: Colors.white, size: 10),
+                        SizedBox(width: 3),
+                        Text(type, style: TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)),
+                      ]),
+                    ),
+                  ),
+                // Badge score en haut à droite
+                if (score != null)
+                  Positioned(
+                    top: 8, right: 8,
+                    child: Container(
+                      padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: scoreColor.withOpacity(0.9),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '${(score * 100).toStringAsFixed(0)}%',
+                        style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                  ),
+              ]),
+            ),
+          ),
+          // ── Infos bas ──────────────────────
+          Padding(
+            padding: EdgeInsets.fromLTRB(10, 8, 10, 10),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(name, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12)),
+              SizedBox(height: 4),
+              // Barre de similarité
+              if (score != null) ...[
+                Row(children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(3),
+                      child: LinearProgressIndicator(
+                        value: score.clamp(0.0, 1.0),
+                        backgroundColor: Colors.white12,
+                        valueColor: AlwaysStoppedAnimation(scoreColor),
+                        minHeight: 4,
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 6),
+                  Text('${(score * 100).toStringAsFixed(0)}%',
+                      style: TextStyle(color: scoreColor, fontSize: 10, fontWeight: FontWeight.w700)),
+                ]),
+                SizedBox(height: 4),
+              ],
+              Row(children: [
+                Icon(Icons.circle, size: 6, color: analyzed ? AppColors.success : AppColors.warning),
+                SizedBox(width: 4),
+                Text(analyzed ? 'Analysé' : 'En attente',
+                    style: TextStyle(color: AppColors.textMuted, fontSize: 10)),
+              ]),
+            ]),
+          ),
+        ]),
+      ),
+    );
   }
 
   Widget _buildSearchResultTile(Map m) {
@@ -1748,6 +1944,115 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   // ─── CHATBOT TAB ────────────────────────
   Widget _buildChatbotTab() => ChatbotPage(medias: _allMedias);
 
+  // ─── HISTORIQUE DES RECHERCHES (Figure 4.9) ──
+  Widget _buildHistoryTab() {
+    return SafeArea(
+      child: Column(children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(16, 20, 16, 12),
+          child: Row(children: [
+            Expanded(child: Text('Historique', style: AppTextStyles.headline.copyWith(fontSize: 24))),
+            if (_searchHistory.isNotEmpty)
+              TextButton.icon(
+                onPressed: () => showDialog(
+                  context: context,
+                  builder: (_) => AlertDialog(
+                    backgroundColor: AppColors.darkCard,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                    title: Text('Effacer l\'historique ?', style: TextStyle(color: Colors.white)),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(context), child: Text('Annuler', style: TextStyle(color: AppColors.textMuted))),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
+                        onPressed: () { Navigator.pop(context); _clearSearchHistory(); },
+                        child: Text('Effacer'),
+                      ),
+                    ],
+                  ),
+                ),
+                icon: Icon(Icons.delete_outline, size: 16, color: AppColors.accent),
+                label: Text('Effacer', style: TextStyle(color: AppColors.accent, fontSize: 12)),
+              ),
+          ]),
+        ),
+        Expanded(
+          child: _searchHistory.isEmpty
+              ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  Icon(Icons.history, size: 56, color: AppColors.textMuted.withOpacity(0.4)),
+                  SizedBox(height: 16),
+                  Text('Aucune recherche effectuée', style: AppTextStyles.caption),
+                ]))
+              : ListView.builder(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  itemCount: _searchHistory.length,
+                  itemBuilder: (_, i) {
+                    final entry = _searchHistory[i];
+                    final query = entry['query'] as String;
+                    final ts = DateTime.tryParse(entry['timestamp'] ?? '') ?? DateTime.now();
+                    final count = entry['resultCount'] as int? ?? 0;
+                    final diff = DateTime.now().difference(ts);
+                    final timeStr = diff.inMinutes < 60
+                        ? 'Il y a ${diff.inMinutes} min'
+                        : diff.inHours < 24
+                            ? 'Il y a ${diff.inHours}h'
+                            : '${ts.day}/${ts.month}/${ts.year} ${ts.hour}:${ts.minute.toString().padLeft(2, '0')}';
+
+                    return GestureDetector(
+                      onTap: () {
+                        _searchCtrl.text = query;
+                        setState(() { _search = query; _semanticMode = true; });
+                        _tabCtrl.animateTo(1);
+                        _semanticSearch(query);
+                      },
+                      child: Container(
+                        margin: EdgeInsets.only(bottom: 10),
+                        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                        decoration: BoxDecoration(
+                          color: AppColors.darkCard,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Row(children: [
+                          Container(
+                            padding: EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: AppColors.primary.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Icon(Icons.search, color: AppColors.primary, size: 18),
+                          ),
+                          SizedBox(width: 14),
+                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(query, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14)),
+                            SizedBox(height: 4),
+                            Row(children: [
+                              Icon(Icons.access_time, size: 11, color: AppColors.textMuted),
+                              SizedBox(width: 4),
+                              Text(timeStr, style: AppTextStyles.caption.copyWith(fontSize: 11)),
+                              SizedBox(width: 12),
+                              Icon(Icons.photo_library_outlined, size: 11, color: AppColors.textMuted),
+                              SizedBox(width: 4),
+                              Text('$count résultat${count > 1 ? 's' : ''}', style: AppTextStyles.caption.copyWith(fontSize: 11)),
+                            ]),
+                          ])),
+                          Icon(Icons.arrow_forward_ios_rounded, size: 14, color: AppColors.textMuted),
+                        ]),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ]),
+    );
+  }
+
+  // ─── DÉTAIL MÉDIA (Figure 3.6 / 3.11) ──
+  void _showMediaDetail(Map m) {
+    Navigator.push(context, MaterialPageRoute(
+      builder: (_) => _MediaDetailPage(media: m, baseUrl: baseUrl),
+    ));
+  }
+
   // ─── BOTTOM NAV ─────────────────────────
   Widget _buildBottomNav() {
     return Container(
@@ -1765,7 +2070,8 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
           tabs: [
             Tab(icon: Icon(Icons.home_outlined), text: 'Accueil'),
             Tab(icon: Icon(Icons.search_rounded), text: 'Recherche'),
-            Tab(icon: Icon(Icons.smart_toy_outlined), text: 'Assistant IA'),
+            Tab(icon: Icon(Icons.smart_toy_outlined), text: 'Assistant'),
+            Tab(icon: Icon(Icons.history_rounded), text: 'Historique'),
           ],
         ),
       ),
@@ -2685,5 +2991,287 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
     if (b < 1024) return '$b B';
     if (b < 1048576) return '${(b/1024).toStringAsFixed(1)} KB';
     return '${(b/1048576).toStringAsFixed(2)} MB';
+  }
+}
+
+// ══════════════════════════════════════════
+//  PAGE DÉTAIL MÉDIA (Figure 3.6 / 3.11)
+// ══════════════════════════════════════════
+class _MediaDetailPage extends StatelessWidget {
+  final Map media;
+  final String baseUrl;
+  const _MediaDetailPage({required this.media, required this.baseUrl});
+
+  String _formatSize(dynamic bytes) {
+    if (bytes == null) return '-';
+    final b = (bytes is num) ? bytes.toInt() : int.tryParse('$bytes') ?? 0;
+    if (b < 1024) return '$b B';
+    if (b < 1048576) return '${(b / 1024).toStringAsFixed(1)} KB';
+    return '${(b / 1048576).toStringAsFixed(2)} MB';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final type       = media['type'] ?? 'document';
+    final name       = media['originalName'] ?? 'Sans nom';
+    final filename   = media['filename'] ?? '';
+    final analyzed   = media['analyzed'] == true;
+    final objects    = (media['aiObjects'] as List? ?? []);
+    final tags       = (media['tags'] as List? ?? []);
+    final confidence = (media['aiConfidence'] as num?)?.toDouble() ?? 0.0;
+    final desc       = media['description'] ?? '';
+    final size       = _formatSize(media['size']);
+    final createdAt  = media['createdAt'] != null
+        ? DateTime.tryParse(media['createdAt'])
+        : null;
+    final dateStr = createdAt != null
+        ? '${createdAt.day}/${createdAt.month}/${createdAt.year} ${createdAt.hour}:${createdAt.minute.toString().padLeft(2, '0')}'
+        : '-';
+    final mediaUrl = filename.isNotEmpty ? '$baseUrl/uploads/$filename' : null;
+    final isImage = type == 'image';
+    final isVideo = type == 'video';
+
+    return Scaffold(
+      backgroundColor: AppColors.dark,
+      appBar: AppBar(
+        backgroundColor: AppColors.dark,
+        elevation: 0,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back_ios_rounded, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Text(name, style: AppTextStyles.title.copyWith(fontSize: 15),
+            maxLines: 1, overflow: TextOverflow.ellipsis),
+        actions: [
+          if (media['favorite'] == true)
+            Icon(Icons.star, color: Colors.amber, size: 22),
+          SizedBox(width: 12),
+        ],
+      ),
+      body: SingleChildScrollView(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+          // ── Prévisualisation ──────────────────
+          Container(
+            width: double.infinity,
+            height: 280,
+            color: AppColors.darkCard,
+            child: isImage && mediaUrl != null
+                ? Image.network(mediaUrl, fit: BoxFit.contain,
+                    errorBuilder: (_, __, ___) => _placeholder(type))
+                : isVideo && mediaUrl != null
+                    ? _VideoPlayer(url: mediaUrl)
+                    : _placeholder(type),
+          ),
+
+          Padding(
+            padding: EdgeInsets.all(20),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+              // ── Statut analyse ────────────────
+              Row(children: [
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: analyzed ? AppColors.success.withOpacity(0.15) : AppColors.warning.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: analyzed ? AppColors.success : AppColors.warning),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(analyzed ? Icons.check_circle : Icons.hourglass_empty,
+                        color: analyzed ? AppColors.success : AppColors.warning, size: 14),
+                    SizedBox(width: 6),
+                    Text(analyzed ? 'Analysé par IA' : 'En attente d\'analyse',
+                        style: TextStyle(color: analyzed ? AppColors.success : AppColors.warning,
+                            fontSize: 12, fontWeight: FontWeight.w600)),
+                  ]),
+                ),
+                SizedBox(width: 10),
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: AppColors.primary.withOpacity(0.4)),
+                  ),
+                  child: Text(type.toUpperCase(),
+                      style: TextStyle(color: AppColors.primary, fontSize: 11, fontWeight: FontWeight.w700)),
+                ),
+              ]),
+
+              SizedBox(height: 20),
+
+              // ── Objets détectés par IA ────────
+              if (objects.isNotEmpty) ...[
+                Text('Objets détectés (MobileNet / CLIP)', style: AppTextStyles.title.copyWith(fontSize: 14)),
+                SizedBox(height: 10),
+                if (confidence > 0)
+                  Padding(
+                    padding: EdgeInsets.only(bottom: 8),
+                    child: Row(children: [
+                      Text('Confiance IA : ', style: AppTextStyles.caption),
+                      Text('${(confidence * 100).toStringAsFixed(1)}%',
+                          style: TextStyle(color: AppColors.warning, fontWeight: FontWeight.w700, fontSize: 13)),
+                    ]),
+                  ),
+                Wrap(
+                  spacing: 8, runSpacing: 8,
+                  children: objects.map((obj) => Container(
+                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: AppColors.primary.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: AppColors.primary.withOpacity(0.4)),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.label_outline, size: 12, color: AppColors.primary),
+                      SizedBox(width: 5),
+                      Text(obj.toString(), style: TextStyle(color: AppColors.primary, fontSize: 12)),
+                    ]),
+                  )).toList(),
+                ),
+                SizedBox(height: 20),
+              ],
+
+              // ── Tags sémantiques ──────────────
+              if (tags.isNotEmpty) ...[
+                Text('Tags sémantiques', style: AppTextStyles.title.copyWith(fontSize: 14)),
+                SizedBox(height: 10),
+                Wrap(
+                  spacing: 8, runSpacing: 8,
+                  children: tags.where((t) => t != 'IA_analysed').map((tag) => Container(
+                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: AppColors.secondary.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: AppColors.secondary.withOpacity(0.3)),
+                    ),
+                    child: Text('#$tag', style: TextStyle(color: AppColors.secondary, fontSize: 11)),
+                  )).toList(),
+                ),
+                SizedBox(height: 20),
+              ],
+
+              // ── Description ───────────────────
+              if (desc.isNotEmpty) ...[
+                Text('Description', style: AppTextStyles.title.copyWith(fontSize: 14)),
+                SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: AppColors.darkCard,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Text(desc, style: AppTextStyles.body),
+                ),
+                SizedBox(height: 20),
+              ],
+
+              // ── Métadonnées ───────────────────
+              Text('Métadonnées', style: AppTextStyles.title.copyWith(fontSize: 14)),
+              SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: AppColors.darkCard,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.white10),
+                ),
+                child: Column(children: [
+                  _metaRow(Icons.insert_drive_file_outlined, 'Nom', name),
+                  _metaRow(Icons.category_outlined, 'Type', type),
+                  _metaRow(Icons.storage_outlined, 'Taille', size),
+                  _metaRow(Icons.calendar_today_outlined, 'Date', dateStr),
+                  _metaRow(Icons.fingerprint, 'ID', (media['id'] ?? '-').toString()),
+                ]),
+              ),
+
+              SizedBox(height: 30),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _metaRow(IconData icon, String label, String value) {
+    return Padding(
+      padding: EdgeInsets.symmetric(vertical: 7),
+      child: Row(children: [
+        Icon(icon, size: 16, color: AppColors.textMuted),
+        SizedBox(width: 10),
+        Text('$label : ', style: AppTextStyles.caption),
+        Expanded(child: Text(value, style: TextStyle(color: Colors.white, fontSize: 13),
+            maxLines: 2, overflow: TextOverflow.ellipsis)),
+      ]),
+    );
+  }
+
+  Widget _placeholder(String type) {
+    final colors = type == 'video'
+        ? [Color(0xFFFF6584), Color(0xFFFF8C69)]
+        : type == 'audio'
+            ? [Color(0xFF3ECFCF), Color(0xFF3E9FCF)]
+            : [Color(0xFF4CAF50), Color(0xFF81C784)];
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: colors),
+      ),
+      child: Center(child: Icon(
+        type == 'video' ? Icons.videocam_outlined
+            : type == 'audio' ? Icons.audiotrack_outlined
+            : Icons.insert_drive_file_outlined,
+        color: Colors.white70, size: 72,
+      )),
+    );
+  }
+}
+
+// ── Lecteur vidéo web natif (Figure 3.11) ─────────────────────────────────────
+class _VideoPlayer extends StatelessWidget {
+  final String url;
+  const _VideoPlayer({required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(fit: StackFit.expand, children: [
+      Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFFFF6584).withOpacity(0.3), Color(0xFF1A1A2E)],
+            begin: Alignment.topCenter, end: Alignment.bottomCenter,
+          ),
+        ),
+      ),
+      Center(
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(Icons.videocam_outlined, color: Colors.white54, size: 56),
+          SizedBox(height: 16),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+            ),
+            onPressed: () {
+              // Copier l'URL dans le presse-papier pour lecture externe
+              Clipboard.setData(ClipboardData(text: url));
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text('URL copiée — collez dans votre navigateur pour lire'),
+                backgroundColor: AppColors.darkCard,
+              ));
+            },
+            icon: Icon(Icons.play_arrow_rounded),
+            label: Text('Lire la vidéo', style: TextStyle(fontWeight: FontWeight.w700)),
+          ),
+          SizedBox(height: 8),
+          Text('URL copiée dans le presse-papier',
+              style: TextStyle(color: Colors.white54, fontSize: 11)),
+        ]),
+      ),
+    ]);
   }
 }
