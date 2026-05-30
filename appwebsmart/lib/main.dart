@@ -12,17 +12,18 @@ import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 
 // ══════════════════════════════════════════
-//  CONFIGURATION — changez l'URL ici si besoin
-//  Émulateur Android : 'http://10.0.2.2:5000'
-//  Vrai téléphone    : 'http://192.168.X.X:5000'
-//  Chrome / Web      : 'http://127.0.0.1:5000'
-//  Windows / Linux   : 'http://127.0.0.1:5000'
+//  CONFIGURATION — URL du backend
+//  Local dev  : 'http://localhost:5000'
+//  Production : URL Render (https://smartmedia-api.onrender.com)
 // ══════════════════════════════════════════
+const String _prodUrl  = 'https://smartmedia-api.onrender.com';
+const String _localUrl = 'http://localhost:5000';
+
 final String baseUrl = kIsWeb
-    ? 'http://localhost:5000'
+    ? _prodUrl   // Web (Cloudflare Pages) → backend Render
     : (defaultTargetPlatform == TargetPlatform.android
-        ? 'http://192.168.1.162:5000'
-        : 'http://localhost:5000');
+        ? 'http://192.168.1.162:5000'  // Android local
+        : _localUrl);                  // Desktop local
 
 // ══════════════════════════════════════════
 //  DESIGN TOKENS

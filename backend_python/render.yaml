@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: smartmedia-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        value: admin@smartmedia.com
+      - key: ADMIN_PASSWORD
+        value: admin123
+      - key: UPLOAD_DIR
+        value: uploads
