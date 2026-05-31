@@ -38,9 +38,10 @@ async def lifespan(app: FastAPI):
         else:
             print(f"ℹ️  Admin existe déjà : {admin_email}")
 
-    # Pré-charger les modèles IA en arrière-plan
+    # Pré-charger les modèles IA en arrière-plan (désactivé en prod légère)
     import asyncio
-    asyncio.create_task(_preload_models())
+    if not os.getenv("DISABLE_AI"):
+        asyncio.create_task(_preload_models())
 
     yield
 

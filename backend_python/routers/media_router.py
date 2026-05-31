@@ -78,6 +78,18 @@ def _media_to_dict(m: Media, score: float | None = None) -> dict:
 async def _analyze_later(media_id, file_path, media_type, original_name, db_factory):
     await asyncio.sleep(1)
     try:
+        # Si IA désactivée, on tag juste le type
+        if os.getenv("DISABLE_AI"):
+            tags = [media_type]
+            async with db_factory() as db:
+                res = await db.execute(select(Media).where(Media.id == media_id))
+                media = res.scalar_one_or_none()
+                if media:
+                    media.analyzed = True
+                    media.tags = json.dumps(tags)
+                    await db.commit()
+            return
+
         loop = asyncio.get_running_loop()
         if media_type == "image":
             result = await loop.run_in_executor(None, _run_image, file_path)
