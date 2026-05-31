@@ -10,7 +10,15 @@ Architecture :
 
 import os
 import json
-import numpy as np
+
+# numpy importé uniquement si IA activée
+_np = None
+def _get_np():
+    global _np
+    if _np is None:
+        import numpy as np
+        _np = np
+    return _np
 
 BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
 CLIP_INDEX_PATH = os.path.join(BASE_DIR, "faiss_clip.bin")
@@ -43,7 +51,8 @@ def _st():
     return _st_model
 
 
-def _normalize(vec: np.ndarray) -> np.ndarray:
+def _normalize(vec) -> object:
+    np = _get_np()
     n = np.linalg.norm(vec)
     return vec / n if n > 1e-8 else vec
 
@@ -105,22 +114,18 @@ def _save_text(idx, meta):
 # ── Ajout ─────────────────────────────────────────────────────────────────────
 
 def add_media(media_id: int, user_id: int, text: str, clip_embedding: list = None):
-    """
-    Indexe un média dans les deux index FAISS.
-    - text          : texte enrichi (nom + type + description + tags + semantic_tags)
-    - clip_embedding: vecteur 512D normalisé issu de CLIP image encoder
-    """
-    # ── Index textuel (sentence-transformers multilingue) ──
+    if os.getenv("DISABLE_AI"):
+        return
+    np = _get_np()
     vec = _st().encode([text], normalize_embeddings=True).astype("float32")
     t_idx, t_meta = _text_idx()
     t_idx.add(vec)
     t_meta.append({"media_id": media_id, "user_id": user_id, "text": text[:300]})
     _save_text(t_idx, t_meta)
 
-    # ── Index visuel CLIP ──
     if clip_embedding and len(clip_embedding) == CLIP_DIM:
         arr = np.array([clip_embedding], dtype="float32")
-        arr[0] = _normalize(arr[0])  # s'assurer que c'est normalisé
+        arr[0] = _normalize(arr[0])
         c_idx, c_meta = _clip_idx()
         c_idx.add(arr)
         c_meta.append({"media_id": media_id, "user_id": user_id})
@@ -258,6 +263,9 @@ def search_media(user_id: int, query: str, top_k: int = 10) -> list:
     2. TEXT  : requête → embedding multilingue → similarité avec textes indexés
     3. Fusion: score_final = max(clip_score, text_score * 0.85)
     """
+    if os.getenv("DISABLE_AI"):
+        return []
+    np = _get_np()
     results = {}
 
     # ── 1. Recherche CLIP (texte → espace visuel) ──────────────────────────
@@ -324,8 +332,13 @@ def search_media(user_id: int, query: str, top_k: int = 10) -> list:
 
 def remove_media(media_id: int):
     """Reconstruit les index FAISS sans le média supprimé."""
+def remove_media(media_id: int):
+    """Reconstruit les index FAISS sans le média supprimé."""
+    if os.getenv("DISABLE_AI"):
+        return
     global _clip_index, _clip_meta, _text_index, _text_meta
     import faiss
+    np = _get_np()
 
     # Reconstruire index CLIP
     _, c_meta = _clip_idx()

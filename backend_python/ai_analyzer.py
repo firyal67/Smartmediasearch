@@ -1,5 +1,13 @@
 import os
-import numpy as np
+
+# numpy chargé à la demande uniquement
+_np_module = None
+def _np():
+    global _np_module
+    if _np_module is None:
+        import numpy as np
+        _np_module = np
+    return _np_module
 
 _mobilenet = None
 _mobilenet_pre = None
@@ -76,8 +84,9 @@ def _load_clip():
     _clip_tok = open_clip.get_tokenizer("ViT-B-32")
 
 
-def _normalize(vec: np.ndarray) -> np.ndarray:
+def _normalize(vec) -> object:
     """Normalise L2 un vecteur numpy."""
+    np = _np()
     n = np.linalg.norm(vec)
     return vec / n if n > 1e-8 else vec
 
@@ -138,6 +147,7 @@ def get_clip_semantic_tags(pil_img, top_n: int = 8) -> list:
             text_feat = _clip_model.encode_text(tokens)
         text_feat = text_feat.float().numpy()
         # Normaliser chaque vecteur texte
+        np = _np()
         norms = np.linalg.norm(text_feat, axis=1, keepdims=True)
         text_feat = text_feat / np.maximum(norms, 1e-8)
 
@@ -254,6 +264,7 @@ def analyze_video(file_path: str, fps_sample: int = 1) -> dict:
         # Moyenne des embeddings + renormalisation
         avg_emb = []
         if embeddings:
+            np = _np()
             arr = np.array(embeddings, dtype=np.float32).mean(axis=0)
             avg_emb = _normalize(arr).tolist()
 
