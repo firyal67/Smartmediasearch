@@ -12,7 +12,11 @@ from sqlalchemy import select, func
 from database import get_db
 from models import Media
 from auth import get_current_user
-import faiss_index
+
+# faiss_index importé à la demande uniquement (lourd en mémoire)
+def _faiss():
+    import faiss_index
+    return faiss_index
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -113,7 +117,7 @@ async def _analyze_later(media_id, file_path, media_type, original_name, db_fact
                 await db.commit()
                 # Texte enrichi avec semantic_tags pour FAISS
                 text = f"{original_name} {media_type} {' '.join(tags)} {' '.join(semantic_tags)}"
-                faiss_index.add_media(media_id, media.user_id, text, result.get("embedding", []))
+                _faiss().add_media(media_id, media.user_id, text, result.get("embedding", []))
     except Exception as e:
         print(f"❌ Analyse IA erreur: {e}")
 
@@ -207,7 +211,7 @@ async def search_media(
 
     # 1. Recherche sémantique FAISS (CLIP + sentence-transformers)
     loop = asyncio.get_running_loop()
-    hits = await loop.run_in_executor(None, faiss_index.search_media, uid, q)
+    hits = await loop.run_in_executor(None, _faiss().search_media, uid, q)
     score_map = {h["media_id"]: h["score"] for h in hits} if hits else {}
 
     # 2. Recherche exacte par nom / description / tags / objets IA
@@ -298,8 +302,8 @@ async def reindex_all(
             # Texte enrichi : nom + type + description + objets + semantic_tags
             existing_tags = json.loads(m.tags) if m.tags else []
             text = f"{m.original_name} {m.type} {m.description or ''} {' '.join(existing_tags)} {' '.join(semantic_tags)}"
-            faiss_index.remove_media(m.id)
-            faiss_index.add_media(m.id, uid, text, clip_emb)
+            _faiss().remove_media(m.id)
+            _faiss().add_media(m.id, uid, text, clip_emb)
             count += 1
             print(f"✅ Réindexé: {m.original_name} | semantic: {semantic_tags[:3]}")
         except Exception as e:
@@ -346,8 +350,8 @@ async def update_description(
     # Réindexer dans FAISS avec la nouvelle description
     tags = json.loads(media.tags) if media.tags else []
     text = f"{media.original_name} {media.type} {body.description} {' '.join(tags)}"
-    faiss_index.remove_media(media_id)
-    faiss_index.add_media(media_id, user["id"], text)
+    _faiss().remove_media(media_id)
+    _faiss().add_media(media_id, user["id"], text)
 
     await db.commit()
     await db.refresh(media)
@@ -368,7 +372,7 @@ async def delete_media(
         raise HTTPException(status_code=401, detail="Non autorisé")
     if media.file_path and os.path.exists(media.file_path):
         os.remove(media.file_path)
-    faiss_index.remove_media(media_id)
+    _faiss().remove_media(media_id)
     await db.delete(media)
     await db.commit()
     return {"msg": "Média supprimé avec succès"}
