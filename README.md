@@ -1,41 +1,46 @@
-# SmartMedia Search
+# 🎬 SmartMedia Search
 
-Application mobile de recherche intelligente de médias par IA.
+Une médiathèque intelligente avec recherche sémantique par IA.
 
-## Structure du projet
+## 🌐 Site en ligne
 
-```
-smartmediasearch/
-├── frontend/        → App Flutter (mobile + web)
-├── backend/         → API FastAPI + SQLite + FAISS + CLIP
-└── backend_old/     → Ancien backend Node.js (archivé)
-```
+👉 **[https://floral-cell-8b2a.feryelguehis86.workers.dev](https://floral-cell-8b2a.feryelguehis86.workers.dev)**
 
-## Lancer le projet
+## 🔑 Comptes de démonstration
 
-### Backend (FastAPI)
+| Rôle | Email | Mot de passe |
+|------|-------|--------------|
+| Utilisateur | demo@smartmedia.com | demo123 |
+| Admin | admin@smartmedia.com | admin123 |
+
+## 🚀 Stack technique
+
+- **Frontend** : Flutter Web (déployé sur Cloudflare Pages)
+- **Backend** : FastAPI Python (déployé sur Render)
+- **IA** : CLIP (OpenAI ViT-B-32) + FAISS + Sentence-Transformers
+- **Base de données** : SQLite (aiosqlite)
+- **Auth** : JWT + bcrypt
+
+## ✨ Fonctionnalités
+
+- Authentification (login / register / rôles admin & user)
+- Upload de médias : images, vidéos, audio, documents (max 50MB)
+- Analyse IA automatique après upload (MobileNet + CLIP)
+- Recherche sémantique FAISS (texte → espace visuel)
+- Dashboard avec statistiques
+- Panel admin (gestion utilisateurs & médias)
+- Favoris et descriptions manuelles
+
+## 🛠️ Lancer en local
+
+### Backend
 ```bash
-cd backend
-py -m pip install -r requirements.txt
-py -m uvicorn main:app --host 0.0.0.0 --port 5000 --reload
+cd backend_python
+.venv_win/Scripts/python.exe main.py
 ```
 
-### Frontend (Flutter)
+### Frontend
 ```bash
-cd frontend
-flutter pub get
-flutter run -d edge --web-port 7777
+cd appwebsmart
+flutter run -d edge
 ```
-
-## Compte de test
-- Email : `demo@smartmedia.com`
-- Mot de passe : `demo123`
-
-## Stack IA
-| Composant | Technologie |
-|-----------|-------------|
-| Classification images | MobileNetV3 (torchvision) |
-| Analyse vidéos | OpenCV + MobileNetV3 |
-| Embeddings image↔texte | CLIP ViT-B/32 (open-clip) |
-| Recherche vectorielle | FAISS |
-| Embeddings texte | SentenceTransformers |
