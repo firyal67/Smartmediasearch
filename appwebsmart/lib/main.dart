@@ -16,14 +16,9 @@ import 'package:file_picker/file_picker.dart';
 //  Local dev  : 'http://localhost:5000'
 //  Production : URL Render (https://smartmedia-api.onrender.com)
 // ══════════════════════════════════════════
-const String _prodUrl  = 'https://smartmedia-api.onrender.com';
 const String _localUrl = 'http://localhost:5000';
 
-final String baseUrl = kIsWeb
-    ? _prodUrl   // Web (Cloudflare Pages) → backend Render
-    : (defaultTargetPlatform == TargetPlatform.android
-        ? 'http://192.168.1.162:5000'  // Android local
-        : _localUrl);                  // Desktop local
+final String baseUrl = _localUrl;
 
 // ══════════════════════════════════════════
 //  DESIGN TOKENS
@@ -191,7 +186,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
         Uri.parse('$baseUrl/api/auth/login'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'email': _emailCtrl.text.trim(), 'password': _passCtrl.text}),
-      ).timeout(Duration(seconds: 15));
+      ).timeout(Duration(seconds: 60));
 
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
@@ -320,7 +315,11 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                         width: double.infinity,
                         height: 52,
                         child: _loading
-                            ? Center(child: CircularProgressIndicator(color: AppColors.primary))
+                            ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                CircularProgressIndicator(color: AppColors.primary),
+                                SizedBox(height: 8),
+                                Text('Connexion… (réveil du serveur ~30s)', style: AppTextStyles.caption),
+                              ]))
                             : ElevatedButton(
                                 onPressed: _login,
                                 child: Text('Se connecter'),
@@ -383,7 +382,7 @@ class _RegisterPageState extends State<RegisterPage> {
           'email': _emailCtrl.text.trim(),
           'password': _passCtrl.text,
         }),
-      ).timeout(Duration(seconds: 15));
+      ).timeout(Duration(seconds: 60));
 
       if (res.statusCode == 200 || res.statusCode == 201) {
         final data = jsonDecode(res.body);
@@ -566,7 +565,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       final res = await http.get(
         Uri.parse('$baseUrl/api/media/dashboard'),
         headers: {'Authorization': 'Bearer $token'},
-      ).timeout(Duration(seconds: 10));
+      ).timeout(Duration(seconds: 60));
       if (res.statusCode == 200) {
         setState(() => _stats = jsonDecode(res.body));
       }
@@ -580,7 +579,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       final res = await http.get(
         Uri.parse('$baseUrl/api/media'),
         headers: {'Authorization': 'Bearer $token'},
-      ).timeout(Duration(seconds: 10));
+      ).timeout(Duration(seconds: 60));
       if (res.statusCode == 200) {
         setState(() => _allMedias = jsonDecode(res.body));
       }
@@ -828,7 +827,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       final res = await http.patch(
         Uri.parse('$baseUrl/api/media/$mediaId/favorite'),
         headers: {'Authorization': 'Bearer $token'},
-      ).timeout(Duration(seconds: 10));
+      ).timeout(Duration(seconds: 60));
       if (res.statusCode == 200) {
         final updated = jsonDecode(res.body);
         setState(() {
@@ -855,7 +854,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
         headers: {
           'Authorization': 'Bearer $token',
         },
-      ).timeout(Duration(seconds: 15));
+      ).timeout(Duration(seconds: 60));
       if (!mounted) return;
       if (res.statusCode == 200 || res.statusCode == 204) {
         setState(() => _allMedias.removeWhere((m) =>
@@ -1445,7 +1444,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
         Uri.parse('$baseUrl/api/media/$mediaId/description'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
         body: jsonEncode({'description': description}),
-      ).timeout(Duration(seconds: 10));
+      ).timeout(Duration(seconds: 60));
       if (res.statusCode == 200) {
         _showSnack('Description enregistrée ✓', isError: false);
         await _fetchMedias();
@@ -2204,7 +2203,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
                     Uri.parse('$baseUrl/api/auth/login'),
                     headers: {'Content-Type': 'application/json'},
                     body: jsonEncode({'email': emailCtrl.text.trim(), 'password': passCtrl.text}),
-                  ).timeout(Duration(seconds: 15));
+                  ).timeout(Duration(seconds: 60));
                   if (res.statusCode == 200) {
                     final data  = jsonDecode(res.body);
                     final prefs = await SharedPreferences.getInstance();
@@ -2704,7 +2703,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   Future<void> _fetchStats() async {
     try {
       final res = await http.get(Uri.parse('$baseUrl/api/admin/stats'),
-          headers: {'Authorization': 'Bearer ${await _token()}'}).timeout(Duration(seconds: 10));
+          headers: {'Authorization': 'Bearer ${await _token()}'}).timeout(Duration(seconds: 60));
       if (res.statusCode == 200) setState(() => _stats = jsonDecode(res.body));
     } catch (_) {}
   }
@@ -2712,7 +2711,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   Future<void> _fetchUsers() async {
     try {
       final res = await http.get(Uri.parse('$baseUrl/api/admin/users'),
-          headers: {'Authorization': 'Bearer ${await _token()}'}).timeout(Duration(seconds: 10));
+          headers: {'Authorization': 'Bearer ${await _token()}'}).timeout(Duration(seconds: 60));
       if (res.statusCode == 200) setState(() => _users = jsonDecode(res.body));
     } catch (_) {}
   }
@@ -2720,7 +2719,7 @@ class _AdminDashboardState extends State<AdminDashboard> with TickerProviderStat
   Future<void> _fetchMedias() async {
     try {
       final res = await http.get(Uri.parse('$baseUrl/api/admin/medias'),
-          headers: {'Authorization': 'Bearer ${await _token()}'}).timeout(Duration(seconds: 10));
+          headers: {'Authorization': 'Bearer ${await _token()}'}).timeout(Duration(seconds: 60));
       if (res.statusCode == 200) setState(() => _medias = jsonDecode(res.body));
     } catch (_) {}
   }
