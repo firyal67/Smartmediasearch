@@ -16,9 +16,12 @@ import 'package:file_picker/file_picker.dart';
 //  Local dev  : 'http://localhost:5000'
 //  Production : URL Render (https://smartmedia-api.onrender.com)
 // ══════════════════════════════════════════
+const String _prodUrl  = 'https://smartmediasearch.onrender.com';
 const String _localUrl = 'http://localhost:5000';
 
-final String baseUrl = _localUrl;
+final String baseUrl = kIsWeb && !Uri.base.host.contains('localhost')
+    ? _prodUrl    // Web déployé → backend Render
+    : _localUrl;  // Local → backend local
 
 // ══════════════════════════════════════════
 //  DESIGN TOKENS

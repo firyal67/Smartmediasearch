@@ -1,3 +1,2 @@
 name = "smartmediasearch"
-compatibility_date = "2026-07-16"
-assets = { directory = "appwebsmart/build/web", binding = "ASSETS" }
+pages_build_output_dir = "appwebsmart/build/web"
