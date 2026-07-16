@@ -23,5 +23,11 @@ appwebsmart/.flutter-plugins
 appwebsmart/.flutter-plugins-dependencies
 appwebsmart/pubspec.lock
 
+# Cloudflare Wrangler
+.wrangler/
+
+# Archives
+*.zip
+
 # VS Code
 .vscode/
